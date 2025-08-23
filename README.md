@@ -22,15 +22,15 @@ OOFSOL is pioneering the world's first <b>Regret Economy</b>—transforming trad
 
 ## 🏗️ Architecture Overview
 
-```mermaid
-graph TD;
-    A[User] -->|Wallet Connect| B(Frontend)
-    B -->|API Calls| C(Backend)
-    C -->|RPC| D(Solana)
-    C -->|DB| E(PostgreSQL)
-    C -->|Storage| F(Cloudflare R2)
-    B -->|WebSockets| C
-    B -->|NFT Mint| G(Base Network)
+```
++--------+      +----------+      +----------+      +----------+
+|  User  | ---> | Frontend | ---> | Backend  | ---> | Solana   |
++--------+      +----------+      +----------+      +----------+
+     |              |                |                |
+     v              v                v                v
++--------+      +----------+      +----------+      +----------+
+| Wallet |      | WebSock. |      | DB (PG)  |      | R2 Store |
++--------+      +----------+      +----------+      +----------+
 ```
 
 ---
@@ -210,15 +210,8 @@ const orchestrator = new AIOrchestrator({
 
 ## 📊 Data Flow Diagrams
 
-```mermaid
-graph LR;
-    User-->|Wallet Connect|Frontend
-    Frontend-->|Analyze|Backend
-    Backend-->|Ingest|Indexer
-    Indexer-->|Detect|Detectors
-    Detectors-->|Render|Renderer
-    Renderer-->|Store|CloudflareR2
-    Backend-->|Serve|Frontend
+```
+User -> Frontend -> Backend -> Indexer -> Detectors -> Renderer -> CloudflareR2 -> Frontend
 ```
 
 ---
