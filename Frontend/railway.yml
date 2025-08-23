@@ -1,0 +1,144 @@
+# 🚂 Railway.com Deployment Configuration
+# OOF Platform Production Deployment
+
+version: 2
+
+services:
+  # Main Application Service
+  app:
+    source: .
+    build:
+      buildCommand: |
+        # Install dependencies
+        npm ci
+        # Build frontend
+        cd client && npm ci && npm run build && cd ..
+        # Build backend if needed
+        npm run build
+      startCommand: npm start
+    deploy:
+      healthcheckPath: /health
+      healthcheckTimeout: 300s
+    variables:
+      NODE_ENV: production
+      PORT: ${{ PORT }}
+    domains:
+      - oof-platform.com
+      - www.oof-platform.com
+
+  # PostgreSQL Database
+  database:
+    image: postgres:15-alpine
+    variables:
+      POSTGRES_DB: oof_platform
+      POSTGRES_USER: ${{ POSTGRES_USER }}
+      POSTGRES_PASSWORD: ${{ POSTGRES_PASSWORD }}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${{ POSTGRES_USER }} -d oof_platform"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Nginx Load Balancer (Optional)
+  nginx:
+    source: nginx
+    build:
+      dockerfile: nginx/Dockerfile
+    variables:
+      NGINX_HOST: oof-platform.com
+    depends_on:
+      - app
+
+# Shared configuration
+shared:
+  variables:
+    # Database connection
+    DATABASE_URL: postgresql://${{ POSTGRES_USER }}:${{ POSTGRES_PASSWORD }}@${{ database.RAILWAY_PRIVATE_DOMAIN }}:5432/oof_platform
+    REDIS_URL: redis://${{ redis.RAILWAY_PRIVATE_DOMAIN }}:6379
+
+    # Dynamic.xyz Authentication
+    VITE_DYNAMIC_ENVIRONMENT_ID: ${{ DYNAMIC_ENVIRONMENT_ID }}
+    DYNAMIC_API_KEY: ${{ DYNAMIC_API_KEY }}
+    DYNAMIC_JWKS_URL: ${{ DYNAMIC_JWKS_URL }}
+    JWT_SECRET: ${{ JWT_SECRET }}
+
+    # Blockchain Configuration
+    SOLANA_RPC_URL: https://api.mainnet-beta.solana.com
+    HELIUS_API_KEY: ${{ HELIUS_API_KEY }}
+    BIRDEYE_API_KEY: ${{ BIRDEYE_API_KEY }}
+    JUPITER_API_URL: https://quote-api.jup.ag/v6
+
+    # AI Services
+    OPENAI_API_KEY: ${{ OPENAI_API_KEY }}
+    ANTHROPIC_API_KEY: ${{ ANTHROPIC_API_KEY }}
+    GOOGLE_GEMINI_API_KEY: ${{ GOOGLE_GEMINI_API_KEY }}
+
+    # Cloudflare R2 Storage
+    R2_ACCOUNT_ID: ${{ R2_ACCOUNT_ID }}
+    R2_ACCESS_KEY_ID: ${{ R2_ACCESS_KEY_ID }}
+    R2_SECRET_ACCESS_KEY: ${{ R2_SECRET_ACCESS_KEY }}
+    R2_BUCKET_NAME: oof-platform-prod
+    CDN_BASE_URL: ${{ CDN_BASE_URL }}
+
+    # Cross-chain Networks
+    ZORA_RPC_URL: https://rpc.zora.energy
+    ZORA_CHAIN_ID: 7777777
+    BASE_RPC_URL: https://mainnet.base.org
+    BASE_CHAIN_ID: 8453
+
+    # Production Features
+    PROMETHEUS_ENABLED: true
+    GRAFANA_ENABLED: true
+    HEALTH_CHECK_ENABLED: true
+    METRICS_ENDPOINT_ENABLED: true
+
+    # Security
+    RATE_LIMIT_WINDOW_MS: 60000
+    RATE_LIMIT_MAX_REQUESTS: 1000
+    CORS_ORIGIN: https://${{ RAILWAY_STATIC_URL }},https://oof-platform.com,https://www.oof-platform.com
+    SESSION_SECRET: ${{ SESSION_SECRET }}
+
+    # Feature Flags
+    ENABLE_AI_ANALYSIS: true
+    ENABLE_CROSS_CHAIN: true
+    ENABLE_NFT_MINTING: true
+    ENABLE_SOCIAL_FEATURES: true
+    ENABLE_STAKING: true
+
+    # Application URL
+    VITE_API_URL: https://${{ RAILWAY_STATIC_URL }}
+
+# Volumes for persistent data
+volumes:
+  postgres_data:
+    size: 10GB
+  redis_data:
+    size: 1GB
+
+# Deployment hooks
+hooks:
+  prebuild:
+    - echo "🚀 Starting OOF Platform deployment..."
+    - echo "Installing dependencies..."
+
+  postbuild:
+    - echo "✅ Build completed successfully!"
+    - echo "Running database migrations..."
+    - npm run db:migrate
+
+  postdeploy:
+    - echo "🎉 OOF Platform deployed successfully!"
+    - echo "Health check: curl -f https://${{ RAILWAY_STATIC_URL }}/health"

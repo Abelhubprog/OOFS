@@ -1,0 +1,389 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Mobile-first responsive design */
+@layer base {
+  html {
+    font-size: 14px;
+    scroll-behavior: smooth;
+  }
+  
+  @media (min-width: 640px) {
+    html {
+      font-size: 16px;
+    }
+  }
+  
+  /* Touch-friendly interactive elements */
+  button, [role="button"], a, input, select, textarea {
+    min-height: 44px;
+  }
+  
+  button, [role="button"] {
+    min-width: 44px;
+  }
+  
+  /* Mobile-optimized spacing */
+  .container {
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
+  }
+  
+  @media (min-width: 640px) {
+    .container {
+      padding-left: 1rem;
+      padding-right: 1rem;
+    }
+  }
+  
+  /* Improved mobile typography */
+  h1 { 
+    font-size: 1.5rem; 
+    line-height: 1.2; 
+    margin-bottom: 0.5rem;
+  }
+  h2 { 
+    font-size: 1.25rem; 
+    line-height: 1.3; 
+    margin-bottom: 0.5rem;
+  }
+  h3 { 
+    font-size: 1.125rem; 
+    line-height: 1.4; 
+    margin-bottom: 0.5rem;
+  }
+  
+  @media (min-width: 640px) {
+    h1 { font-size: 2rem; margin-bottom: 0.75rem; }
+    h2 { font-size: 1.5rem; margin-bottom: 0.75rem; }
+    h3 { font-size: 1.25rem; margin-bottom: 0.75rem; }
+  }
+  
+  @media (min-width: 1024px) {
+    h1 { font-size: 2.5rem; margin-bottom: 1rem; }
+    h2 { font-size: 2rem; margin-bottom: 1rem; }
+    h3 { font-size: 1.5rem; margin-bottom: 1rem; }
+  }
+  
+  /* Mobile-optimized card spacing */
+  .card {
+    margin-bottom: 0.75rem;
+  }
+  
+  @media (min-width: 640px) {
+    .card {
+      margin-bottom: 1rem;
+    }
+  }
+  
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+:root {
+  /* OOF Purple Theme - Light Mode */
+  --background: hsl(270, 100%, 98%);
+  --foreground: hsl(272, 54%, 15%);
+  --muted: hsl(269, 100%, 95%);
+  --muted-foreground: hsl(272, 20%, 45%);
+  --popover: hsl(270, 100%, 98%);
+  --popover-foreground: hsl(272, 54%, 15%);
+  --card: hsl(0, 0%, 100%);
+  --card-foreground: hsl(272, 54%, 15%);
+  --border: hsl(269, 100%, 92%);
+  --input: hsl(269, 100%, 92%);
+  --primary: hsl(271, 81%, 56%);
+  --primary-foreground: hsl(0, 0%, 100%);
+  --secondary: hsl(269, 100%, 95%);
+  --secondary-foreground: hsl(272, 54%, 15%);
+  --accent: hsl(269, 100%, 92%);
+  --accent-foreground: hsl(272, 54%, 15%);
+  --destructive: hsl(0, 84%, 60%);
+  --destructive-foreground: hsl(0, 0%, 100%);
+  --ring: hsl(271, 81%, 56%);
+  --radius: 0.75rem;
+  
+  /* OOF Purple Theme Extended Colors */
+  --purple-50: hsl(270, 100%, 98%);
+  --purple-100: hsl(269, 100%, 95%);
+  --purple-200: hsl(269, 100%, 92%);
+  --purple-300: hsl(269, 97%, 85%);
+  --purple-400: hsl(270, 95%, 75%);
+  --purple-500: hsl(271, 81%, 56%);
+  --purple-600: hsl(271, 81%, 50%);
+  --purple-700: hsl(272, 72%, 40%);
+  --purple-800: hsl(272, 47%, 21%);
+  --purple-900: hsl(273, 54%, 15%);
+  
+  /* Success/Error Colors */
+  --success: hsl(142, 76%, 36%);
+  --success-foreground: hsl(0, 0%, 100%);
+  --warning: hsl(38, 92%, 50%);
+  --warning-foreground: hsl(0, 0%, 100%);
+}
+
+.dark {
+  /* OOF Purple Theme - Dark Mode */
+  --background: hsl(273, 54%, 15%);
+  --foreground: hsl(270, 100%, 98%);
+  --muted: hsl(272, 47%, 21%);
+  --muted-foreground: hsl(272, 20%, 65%);
+  --popover: hsl(272, 47%, 21%);
+  --popover-foreground: hsl(270, 100%, 98%);
+  --card: hsl(272, 47%, 21%);
+  --card-foreground: hsl(270, 100%, 98%);
+  --border: hsl(272, 47%, 25%);
+  --input: hsl(272, 47%, 25%);
+  --primary: hsl(271, 81%, 60%);
+  --primary-foreground: hsl(273, 54%, 15%);
+  --secondary: hsl(272, 47%, 25%);
+  --secondary-foreground: hsl(270, 100%, 98%);
+  --accent: hsl(272, 47%, 25%);
+  --accent-foreground: hsl(270, 100%, 98%);
+  --destructive: hsl(0, 84%, 60%);
+  --destructive-foreground: hsl(270, 100%, 98%);
+  --ring: hsl(271, 81%, 60%);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply font-sans antialiased bg-background text-foreground;
+    font-family: 'Inter', sans-serif;
+  }
+}
+
+@layer utilities {
+  /* OOF Purple Gradient Text */
+  .gradient-text {
+    background: linear-gradient(135deg, hsl(271, 81%, 56%) 0%, hsl(280, 100%, 70%) 50%, hsl(330, 81%, 60%) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  
+  /* OOF Purple Gradient Backgrounds */
+  .oof-gradient {
+    background: linear-gradient(135deg, hsl(271, 81%, 56%) 0%, hsl(280, 100%, 70%) 100%);
+  }
+  
+  .oof-gradient-soft {
+    background: linear-gradient(135deg, hsl(269, 100%, 95%) 0%, hsl(271, 81%, 56%) 100%);
+  }
+  
+  .oof-gradient-dark {
+    background: linear-gradient(135deg, hsl(272, 47%, 21%) 0%, hsl(271, 81%, 56%) 100%);
+  }
+  
+  /* Animations for OOF theme */
+  .animate-float {
+    animation: float 3s ease-in-out infinite;
+  }
+  
+  .animate-glow-gold {
+    animation: glow-gold 2s ease-in-out infinite alternate;
+  }
+  
+  .animate-glow-purple {
+    animation: glow-purple 2s ease-in-out infinite alternate;
+  }
+  
+  .animate-bounce-slow {
+    animation: bounce 3s infinite;
+  }
+  
+  .animate-pulse-fast {
+    animation: pulse 1s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+  
+  /* Custom keyframes */
+  @keyframes float {
+    0%, 100% { transform: translateY(0px); }
+    50% { transform: translateY(-10px); }
+  }
+  
+  @keyframes glow-gold {
+    0% { box-shadow: 0 0 5px #fbbf24, 0 0 10px #fbbf24, 0 0 15px #fbbf24; }
+    100% { box-shadow: 0 0 10px #fbbf24, 0 0 20px #fbbf24, 0 0 30px #fbbf24; }
+  }
+  
+  @keyframes glow-purple {
+    0% { box-shadow: 0 0 5px hsl(271, 81%, 56%), 0 0 10px hsl(271, 81%, 56%), 0 0 15px hsl(271, 81%, 56%); }
+    100% { box-shadow: 0 0 10px hsl(271, 81%, 56%), 0 0 20px hsl(271, 81%, 56%), 0 0 30px hsl(271, 81%, 56%); }
+  }
+  
+  /* Glass morphism effects */
+  .glass {
+    background: rgba(255, 255, 255, 0.1);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+  }
+  
+  .glass-dark {
+    background: rgba(0, 0, 0, 0.3);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+  }
+  
+  /* Utility classes for OOF theming */
+  .text-oof-primary {
+    color: hsl(271, 81%, 56%);
+  }
+  
+  .bg-oof-primary {
+    background-color: hsl(271, 81%, 56%);
+  }
+  
+  .border-oof-primary {
+    border-color: hsl(271, 81%, 56%);
+  }
+  
+  /* Hover states */
+  .hover-oof-glow:hover {
+    box-shadow: 0 0 20px hsl(271, 81%, 56%);
+    transition: box-shadow 0.3s ease;
+  }
+  
+  /* Card hover effects */
+  .card-hover {
+    transition: all 0.3s ease;
+  }
+  
+  .card-hover:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 20px 40px rgba(139, 92, 246, 0.3);
+  }
+  
+  /* Glass Card Effects */
+  .glass-card {
+    backdrop-filter: blur(16px) saturate(180%);
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+  }
+  
+  .glass-card-purple {
+    backdrop-filter: blur(16px) saturate(180%);
+    background: hsla(271, 81%, 56%, 0.1);
+    border: 1px solid hsla(271, 81%, 56%, 0.2);
+  }
+  
+  /* OOF Specific Effects */
+  .oof-shadow {
+    box-shadow: 0 20px 25px -5px hsla(271, 81%, 56%, 0.1), 
+                0 10px 10px -5px hsla(271, 81%, 56%, 0.04);
+  }
+  
+  .oof-shadow-lg {
+    box-shadow: 0 25px 50px -12px hsla(271, 81%, 56%, 0.25);
+  }
+  
+  .oof-glow:hover {
+    box-shadow: 0 0 30px hsla(271, 81%, 56%, 0.4);
+    transition: box-shadow 0.3s ease;
+  }
+  
+  .oof-border {
+    border: 2px solid hsl(271, 81%, 56%);
+  }
+  
+  .oof-border-gradient {
+    border: 2px solid transparent;
+    background: linear-gradient(white, white) padding-box,
+                linear-gradient(135deg, hsl(271, 81%, 56%), hsl(280, 100%, 70%)) border-box;
+  }
+  
+  /* Animations */
+  .coin-flip {
+    animation: coinFlip 2s ease-in-out infinite;
+  }
+  
+  .animate-float {
+    animation: float 3s ease-in-out infinite;
+  }
+  
+  .animate-pulse-slow {
+    animation: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+  
+  .animate-pulse-purple {
+    animation: pulsePurple 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+  
+  .animate-spin-slow {
+    animation: spin 3s linear infinite;
+  }
+  
+  .animate-bounce-slow {
+    animation: bounceSlow 3s ease-in-out infinite;
+  }
+  
+  .animate-glow {
+    animation: glow 2s ease-in-out infinite alternate;
+  }
+}
+
+@keyframes coinFlip {
+  0%, 100% { transform: rotateY(0deg); }
+  50% { transform: rotateY(180deg); }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-10px); }
+}
+
+@keyframes pulsePurple {
+  0%, 100% { 
+    opacity: 1;
+    box-shadow: 0 0 20px hsla(271, 81%, 56%, 0.3);
+  }
+  50% { 
+    opacity: 0.8;
+    box-shadow: 0 0 30px hsla(271, 81%, 56%, 0.5);
+  }
+}
+
+@keyframes bounceSlow {
+  0%, 20%, 50%, 80%, 100% { transform: translateY(0); }
+  40% { transform: translateY(-10px); }
+  60% { transform: translateY(-5px); }
+}
+
+@keyframes glow {
+  from {
+    box-shadow: 0 0 20px hsla(271, 81%, 56%, 0.2);
+  }
+  to {
+    box-shadow: 0 0 30px hsla(271, 81%, 56%, 0.4);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.animate-shimmer {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    hsla(271, 81%, 56%, 0.2),
+    transparent
+  );
+  background-size: 200% 100%;
+  animation: shimmer 2s infinite;
+}
