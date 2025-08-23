@@ -1,0 +1,308 @@
+syntax = "proto3";
+
+package oof.bus;
+
+option go_package = "github.com/oof/backend/gen/go/bus";
+option java_package = "com.oof.backend.bus";
+option java_outer_classname = "ChainEventProto";
+option csharp_namespace = "Oof.Backend.Bus";
+option php_namespace = "Oof\\Backend\\Bus";
+option ruby_package = "Oof::Backend::Bus";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// Chain event message for event bus communication
+message ChainEvent {
+  // Unique event identifier
+  string id = 1;
+
+  // Transaction signature that generated this event
+  string signature = 2;
+
+  // Wallet address involved in the event
+  string wallet_address = 3;
+
+  // Block timestamp when event occurred
+  google.protobuf.Timestamp timestamp = 4;
+
+  // Event classification
+  EventKind kind = 5;
+
+  // Specific action type
+  Action action = 6;
+
+  // Token mint address
+  string token_mint = 7;
+
+  // Token symbol (e.g., SOL, USDC)
+  string token_symbol = 8;
+
+  // Token amount involved (as string to preserve precision)
+  string amount = 9;
+
+  // USD price at time of transaction
+  string price_usd = 10;
+
+  // SOL fee paid for transaction
+  string fee_sol = 11;
+
+  // Additional metadata
+  google.protobuf.Struct metadata = 12;
+
+  // Block height for ordering
+  uint64 block_height = 13;
+
+  // Transaction index within block
+  uint32 transaction_index = 14;
+
+  // Instruction index within transaction
+  uint32 instruction_index = 15;
+
+  // Program ID that executed the instruction
+  string program_id = 16;
+
+  // Account keys involved in the transaction
+  repeated string account_keys = 17;
+
+  // Whether transaction was successful
+  bool success = 18;
+
+  // Error message if transaction failed
+  optional string error_message = 19;
+}
+
+// Event classification enum
+enum EventKind {
+  EVENT_KIND_UNSPECIFIED = 0;
+  EVENT_KIND_TRANSFER = 1;
+  EVENT_KIND_SWAP = 2;
+  EVENT_KIND_STAKE = 3;
+  EVENT_KIND_UNSTAKE = 4;
+  EVENT_KIND_MINT = 5;
+  EVENT_KIND_BURN = 6;
+  EVENT_KIND_APPROVE = 7;
+  EVENT_KIND_REVOKE = 8;
+  EVENT_KIND_CREATE_ACCOUNT = 9;
+  EVENT_KIND_CLOSE_ACCOUNT = 10;
+  EVENT_KIND_NFT_TRANSFER = 11;
+  EVENT_KIND_NFT_MINT = 12;
+  EVENT_KIND_NFT_BURN = 13;
+  EVENT_KIND_DEFI_INTERACT = 14;
+  EVENT_KIND_GOVERNANCE = 15;
+  EVENT_KIND_PROGRAM_DEPLOY = 16;
+  EVENT_KIND_PROGRAM_UPGRADE = 17;
+  EVENT_KIND_SYSTEM_TRANSFER = 18;
+  EVENT_KIND_RENT_PAYMENT = 19;
+  EVENT_KIND_VOTE = 20;
+}
+
+// Action type enum
+enum Action {
+  ACTION_UNSPECIFIED = 0;
+  ACTION_BUY = 1;
+  ACTION_SELL = 2;
+  ACTION_SEND = 3;
+  ACTION_RECEIVE = 4;
+  ACTION_STAKE = 5;
+  ACTION_UNSTAKE = 6;
+  ACTION_CLAIM_REWARDS = 7;
+  ACTION_PROVIDE_LIQUIDITY = 8;
+  ACTION_REMOVE_LIQUIDITY = 9;
+  ACTION_LEND = 10;
+  ACTION_BORROW = 11;
+  ACTION_REPAY = 12;
+  ACTION_LIQUIDATE = 13;
+  ACTION_VOTE = 14;
+  ACTION_DELEGATE = 15;
+  ACTION_UNDELEGATE = 16;
+  ACTION_CREATE_POSITION = 17;
+  ACTION_CLOSE_POSITION = 18;
+  ACTION_ADJUST_POSITION = 19;
+  ACTION_HARVEST = 20;
+  ACTION_COMPOUND = 21;
+  ACTION_BRIDGE_IN = 22;
+  ACTION_BRIDGE_OUT = 23;
+  ACTION_WRAP = 24;
+  ACTION_UNWRAP = 25;
+  ACTION_MINT_NFT = 26;
+  ACTION_BURN_NFT = 27;
+  ACTION_LIST_NFT = 28;
+  ACTION_DELIST_NFT = 29;
+  ACTION_BID_NFT = 30;
+  ACTION_ACCEPT_BID = 31;
+  ACTION_CANCEL_BID = 32;
+}
+
+// Batch of chain events for efficient processing
+message ChainEventBatch {
+  repeated ChainEvent events = 1;
+
+  // Batch metadata
+  string batch_id = 2;
+  google.protobuf.Timestamp created_at = 3;
+  uint32 total_events = 4;
+  uint64 start_block = 5;
+  uint64 end_block = 6;
+  string producer_id = 7;
+}
+
+// Event filter for subscriptions
+message ChainEventFilter {
+  // Filter by wallet addresses
+  repeated string wallet_addresses = 1;
+
+  // Filter by event kinds
+  repeated EventKind event_kinds = 2;
+
+  // Filter by actions
+  repeated Action actions = 3;
+
+  // Filter by token mints
+  repeated string token_mints = 4;
+
+  // Filter by program IDs
+  repeated string program_ids = 5;
+
+  // Minimum USD value threshold
+  optional string min_value_usd = 6;
+
+  // Block range filter
+  optional BlockRange block_range = 7;
+
+  // Time range filter
+  optional TimeRange time_range = 8;
+}
+
+// Block range for filtering
+message BlockRange {
+  optional uint64 start_block = 1;
+  optional uint64 end_block = 2;
+}
+
+// Time range for filtering
+message TimeRange {
+  optional google.protobuf.Timestamp start_time = 1;
+  optional google.protobuf.Timestamp end_time = 2;
+}
+
+// Event subscription request
+message EventSubscription {
+  string subscription_id = 1;
+  ChainEventFilter filter = 2;
+  string callback_url = 3;
+  repeated string event_types = 4;
+  bool include_metadata = 5;
+  uint32 batch_size = 6;
+  uint32 max_batch_wait_ms = 7;
+}
+
+// Event processing status
+message EventProcessingStatus {
+  string event_id = 1;
+  ProcessingState state = 2;
+  google.protobuf.Timestamp processed_at = 3;
+  repeated string processor_ids = 4;
+  optional string error_message = 5;
+  uint32 retry_count = 6;
+}
+
+// Processing state enum
+enum ProcessingState {
+  PROCESSING_STATE_UNSPECIFIED = 0;
+  PROCESSING_STATE_PENDING = 1;
+  PROCESSING_STATE_PROCESSING = 2;
+  PROCESSING_STATE_COMPLETED = 3;
+  PROCESSING_STATE_FAILED = 4;
+  PROCESSING_STATE_RETRYING = 5;
+  PROCESSING_STATE_SKIPPED = 6;
+}
+
+// Event analytics for monitoring
+message EventAnalytics {
+  string wallet_address = 1;
+  google.protobuf.Timestamp period_start = 2;
+  google.protobuf.Timestamp period_end = 3;
+
+  // Event counts by type
+  map<string, uint32> event_counts = 4;
+
+  // Total value processed
+  string total_value_usd = 5;
+
+  // Unique tokens interacted with
+  uint32 unique_tokens = 6;
+
+  // Unique programs interacted with
+  uint32 unique_programs = 7;
+
+  // Transaction frequency metrics
+  TransactionFrequency frequency = 8;
+}
+
+// Transaction frequency metrics
+message TransactionFrequency {
+  double avg_transactions_per_day = 1;
+  double avg_transactions_per_hour = 2;
+  uint32 max_transactions_per_day = 3;
+  uint32 total_transactions = 4;
+  uint32 successful_transactions = 5;
+  uint32 failed_transactions = 6;
+}
+
+// Service definitions for gRPC
+service ChainEventService {
+  // Publish a single event
+  rpc PublishEvent(ChainEvent) returns (PublishResponse);
+
+  // Publish a batch of events
+  rpc PublishEventBatch(ChainEventBatch) returns (PublishResponse);
+
+  // Subscribe to events
+  rpc SubscribeEvents(EventSubscription) returns (stream ChainEvent);
+
+  // Query events with filters
+  rpc QueryEvents(EventQuery) returns (EventQueryResponse);
+
+  // Get event processing status
+  rpc GetProcessingStatus(ProcessingStatusRequest) returns (EventProcessingStatus);
+
+  // Get analytics for a wallet
+  rpc GetEventAnalytics(EventAnalyticsRequest) returns (EventAnalytics);
+}
+
+// Publish response
+message PublishResponse {
+  bool success = 1;
+  string message = 2;
+  repeated string event_ids = 3;
+}
+
+// Event query request
+message EventQuery {
+  ChainEventFilter filter = 1;
+  uint32 limit = 2;
+  uint32 offset = 3;
+  string order_by = 4;
+  bool ascending = 5;
+}
+
+// Event query response
+message EventQueryResponse {
+  repeated ChainEvent events = 1;
+  uint32 total_count = 2;
+  bool has_more = 3;
+  optional string next_cursor = 4;
+}
+
+// Processing status request
+message ProcessingStatusRequest {
+  repeated string event_ids = 1;
+}
+
+// Event analytics request
+message EventAnalyticsRequest {
+  string wallet_address = 1;
+  TimeRange time_range = 2;
+  repeated EventKind event_kinds = 3;
+}

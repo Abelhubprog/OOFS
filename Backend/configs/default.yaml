@@ -1,0 +1,178 @@
+# Default Configuration
+# Base configuration for OOF backend services
+
+# CORS settings for web client access
+cors:
+  allow_origin: "http://localhost:5173"  # Development frontend
+  allow_headers:
+    - "Authorization"
+    - "Content-Type"
+    - "X-Requested-With"
+    - "Accept"
+    - "Origin"
+    - "X-Request-ID"
+  allow_methods:
+    - "GET"
+    - "POST"
+    - "PUT"
+    - "DELETE"
+    - "OPTIONS"
+  allow_credentials: true
+  max_age: 3600  # Preflight cache duration
+
+# Service binding addresses
+api:
+  bind: "0.0.0.0:8080"
+  request_timeout_seconds: 30
+  max_request_size_mb: 10
+
+indexer:
+  bind: "0.0.0.0:8081"
+  webhook_timeout_seconds: 10
+  max_webhook_size_mb: 5
+
+workers:
+  bind: "0.0.0.0:8082"  # For health checks
+  job_timeout_seconds: 300
+  max_concurrent_jobs: 10
+
+renderer:
+  bind: "0.0.0.0:8083"  # For health checks
+  render_timeout_seconds: 30
+  max_concurrent_renders: 5
+
+# Logging configuration
+logging:
+  level: "info"                    # trace|debug|info|warn|error
+  format: "json"                   # json|pretty
+  include_timestamps: true
+  include_file_line: false         # Set to true for debugging
+  max_log_file_size_mb: 100
+  log_retention_days: 30
+
+  # Component-specific log levels
+  components:
+    sqlx: "warn"                   # Reduce SQL query noise
+    reqwest: "warn"                # Reduce HTTP client noise
+    hyper: "warn"                  # Reduce HTTP server noise
+
+# Database configuration
+database:
+  max_connections: 50
+  min_connections: 5
+  acquire_timeout_seconds: 10
+  idle_timeout_seconds: 600       # 10 minutes
+  max_lifetime_seconds: 3600      # 1 hour
+
+  # Query settings
+  statement_timeout_seconds: 30
+  slow_query_threshold_ms: 1000   # Log queries taking > 1s
+
+# Redis configuration (optional)
+redis:
+  max_connections: 20
+  min_connections: 2
+  connection_timeout_seconds: 5
+  command_timeout_seconds: 5
+
+# Object storage configuration
+object_storage:
+  request_timeout_seconds: 30
+  max_retries: 3
+  retry_delay_ms: 1000
+
+# HTTP client settings
+http_client:
+  timeout_seconds: 30
+  max_retries: 3
+  retry_delay_ms: 1000
+  user_agent: "OOF-Backend/1.0"
+
+  # Connection pooling
+  max_idle_connections: 100
+  max_idle_connections_per_host: 10
+  keep_alive_timeout_seconds: 90
+
+# Security settings
+security:
+  # JWT settings
+  jwt:
+    algorithm: "RS256"
+    token_lifetime_hours: 24
+    refresh_token_lifetime_days: 30
+
+  # API key settings
+  api_keys:
+    length: 32
+    prefix: "oof_"
+
+  # HMAC settings
+  hmac:
+    algorithm: "SHA256"
+
+  # Password hashing (if applicable)
+  password:
+    algorithm: "argon2"
+    memory_cost: 65536
+    time_cost: 3
+    parallelism: 4
+
+# Monitoring and metrics
+monitoring:
+  metrics:
+    enabled: true
+    bind: "0.0.0.0:9090"          # Prometheus metrics endpoint
+    path: "/metrics"
+
+  health_checks:
+    enabled: true
+    interval_seconds: 30
+    timeout_seconds: 5
+
+  # Performance monitoring
+  performance:
+    enable_request_tracing: true
+    sample_rate: 0.1               # 10% of requests
+    slow_request_threshold_ms: 1000
+
+# Feature flags
+features:
+  enable_sse_streaming: true
+  enable_websockets: true
+  enable_card_generation: true
+  enable_nft_minting: false        # Disabled by default
+  enable_leaderboards: true
+  enable_webhooks: false           # Disabled by default
+  enable_beta_features: false
+
+# Development settings
+development:
+  enable_debug_endpoints: false   # /debug/* endpoints
+  enable_admin_endpoints: false   # /admin/* endpoints
+  mock_external_services: false   # Mock RPC/Jupiter calls
+  skip_auth_in_dev: false         # NEVER enable in production
+
+# Production optimizations
+production:
+  precompile_templates: true
+  enable_compression: true
+  compression_level: 6
+  enable_caching: true
+  cache_static_assets: true
+
+# Maintenance settings
+maintenance:
+  enable_maintenance_mode: false
+  maintenance_message: "OOF is currently undergoing maintenance. Please try again later."
+  allowed_ips_during_maintenance: []
+
+# Backup and recovery
+backup:
+  enable_automated_backups: false # Set up externally
+  backup_retention_days: 90
+
+# Notifications (for admin alerts)
+notifications:
+  enable_email_alerts: false
+  enable_slack_alerts: false
+  alert_cooldown_minutes: 30       # Prevent alert spam

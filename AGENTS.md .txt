@@ -1,0 +1,1588 @@
+You’re thinking in exactly the right direction: the cheapest long-run design is **dedupe-first** (store once, reuse forever), **windowed** (2-year horizon per plan), and **columnar-lean** (keep only what you must for OOF math). Below is a concrete, production design for **wallet analysis up to 2 years**, with **entries/exits/re-entries**, and **top OOF moments**, while **minimizing both RPC and storage costs** for subsequent queries.
+
+---
+
+# 0) Design goals (specific to your ask)
+
+* **Scope:** up to **2 years** of SPL activity per wallet (tier-bound).
+* **Output:** per token → **episodes/lots/exits**, PnL, all **OOF moments**, then **ranked “highest”** in each class (profit, loss, S2E, BHD, BadRoute, Idle, Rug).
+* **Cost:** Store once, reuse across users; keep storage minimal; make re-queries O(ms).
+
+---
+
+# 1) Cheap-first ingestion patterns (what we store and why)
+
+## 1.1 Store raw tx **once** (content-addressable)
+
+* Object store (R2/S3):
+
+  * **Key:** `tx/<first2>/<sig>.json.zst`
+  * **Value:** compressed raw tx (zstd).
+* DB row (thin pointer):
+
+  ```
+  tx_raw(sig PK, slot, ts, status, object_key, size_bytes)
+  ```
+
+**Why:** Any wallet that ever touches this signature reuses the same raw body. You’ll never refetch it.
+
+## 1.2 Store **normalized actions** (shared across all wallets)
+
+* Each signature is parsed into **one or more actions**, independent of “whose” wallet it is:
+
+  ```
+  actions(id PK, sig FK, log_idx, slot, ts, program_id, kind,
+          mint, amount_dec, exec_px_usd_dec, route, flags_json)
+  participants(sig FK, wallet)  -- junction table, one row per wallet seen in sig
+  ```
+
+**Why:** Later, to answer “what did wallet W do?”, you **don’t fetch chain**—you query `participants` → `actions`. This is your **dedupe**.
+
+## 1.3 Don’t store chain-wide history
+
+* **We do not** snapshot *all* SPL transactions for the whole chain (too big).
+* Instead, we **gradually build** a corpus that grows with users: each analyzed wallet contributes signatures; signatures are de-duplicated globally.
+
+---
+
+# 2) Two-year coverage with **windowed backfill** (tier-aware)
+
+## 2.1 Per-wallet backfill algorithm (2y)
+
+* Determine plan tier → compute **`from_ts = now - min(2y, plan.backfill_days)`**.
+* Query **our DB first** for `(wallet=W, ts ≥ from_ts)`.
+
+  * If **coverage gap** exists (earliest in DB > `from_ts`, or recent tail missing): enqueue **delta** fetch tasks only for the gap.
+* For missing ranges:
+
+  1. Page signatures (newest→oldest) until `from_ts` or ceilings (per-run limits).
+  2. For each signature `sig`:
+
+     * **If `tx_raw` exists** → skip fetch (we’ve seen it from some wallet before).
+     * Else **fetch once**, store `tx_raw`, parse to `actions`, populate `participants`.
+* Set `wallet_cursors(wallet, from_sig, to_sig, from_ts, to_ts)` to mark your onboarded window.
+
+**Net effect:** the **first** wallet that touches a given signature pays the RPC cost; **everyone else** reuses it.
+
+---
+
+# 3) Storage footprint: keep it tiny, keep it fast
+
+* **Raw JSON**: compressed zstd in object store; not in Postgres.
+* **DB tables** are *minimal*:
+
+  * `tx_raw(sig, slot, ts, object_key)` (pointers)
+  * `actions(...)` (**narrow**, numeric DECIMALs; no giant blobs)
+  * `participants(sig, wallet)` (2 columns, both indexed)
+  * `lots/realized_trades/episodes` (**derived** per wallet, i.e., small)
+  * `oof_moments` (**very small** compared to actions)
+* **Indexes**:
+
+  * `participants (wallet, sig)` btree
+  * `actions (sig, log_idx)`, `actions (mint, ts)`, partial on recent months
+  * Optional **BRIN** on large time columns `(ts)` to keep index size tiny for range scans
+
+**Rough sizing** (order-of-magnitude):
+
+* Raw tx compressed: **\~2–6 KB/sig** typical.
+* `actions`: **\~150–300 bytes/action** (narrow schema).
+* `participants`: **\~60–90 bytes/row**.
+* For a “heavy” 2-year wallet (say 50k signatures), raw+normalized is still **sub-GB**; reused across many wallets.
+
+---
+
+# 4) From actions → entries/exits/re-entries (episode engine)
+
+Per `(wallet, mint)`, stream **actions** filtered by that wallet (join via `participants`) and **ordered by (slot, sig, log\_idx)**. Build:
+
+```
+state:
+  exposure_qty, avg_cost_usd, realized_pnl_usd
+  open_lots: queue<Lot{entry_ts, entry_px, qty_initial, qty_remaining}>
+  episode_id | null
+```
+
+**Transitions**
+
+* BUY: if exposure == 0 ⇒ **new episode\_id**; push lot; update avg\_cost.
+* SELL/OUT: pop lots FIFO; compute `ExitEvent{ts, qty_exited, vwavg_exit_px, realized_sum}`; if exposure → 0 ⇒ close episode.
+* TRANSFER self: move basis; no PnL.
+* TRANSFER to CEX: treat as **realization at mid** (configurable).
+
+**Persist (derived)**
+
+* `lots`, `realized_trades`, `episodes` (one new row when episode ends or snapshots every N=500 events to speed restarts).
+
+---
+
+# 5) OOF Detectors (per event; re-entry safe)
+
+* **S2E** (Sold-Too-Early): on **every exit**, compute `peak_px in [t_exit, t_exit+7d]` ⇒ `missed_usd = qty_exited*(peak - exit_px)`; threshold on `%` and `$`.
+* **BHD** (Bag-Holder Drawdown): on **every buy lot**, compute `trough_px in [t_buy, t_buy+7d]` ⇒ `dd_pct = trough/entry - 1`; threshold on `%`.
+* **Bad Route**: on **every swap**, compare executed vs best Jupiter quote (nearest minute); threshold on `% worse`.
+* **Idle Yield**: over continuous windows of idle OOF balance; compute missed staking rewards in USD.
+* **Rug** (optional): token facts show structural collapse; if wallet held across onset → record worst rug outcome.
+
+**All moments are independent per trigger** (so many re-entries create many candidates). We retain **all**, then **rank** later to return the **highest** per class.
+
+---
+
+# 6) Price with 2-year reach (no runaway costs)
+
+* Persist **bucketed prices** only for **mints that appear in actions**:
+
+  * 0–7d: **1m**; 7–180d: **5m**; 180d–2y: **1h**.
+* Minutes/hours are **just enough** to compute:
+
+  * entry/exit px (nearest bucket)
+  * max/min in 7d windows (index-only aggregate)
+* **Fallback**: if external price missing, build local **VWAP** from observed swaps vs SOL/USDC and bridge via SOL price; mark confidence in `explain_json`.
+
+**This keeps price storage proportional to the **set of touched mints**, not chain-wide.**
+
+---
+
+# 7) “Pick the highest” (cheap queries)
+
+### Wallet extremes (across all tokens & episodes)
+
+* **Highest realized win/loss (\$):** from `realized_trades`:
+
+  ```sql
+  SELECT * FROM realized_trades WHERE wallet=$1
+  ORDER BY realized_pnl_usd DESC LIMIT 1;   -- win
+  SELECT * FROM realized_trades WHERE wallet=$1
+  ORDER BY realized_pnl_usd ASC LIMIT 1;    -- loss
+  ```
+* **Top S2E (missed USD):**
+
+  ```sql
+  SELECT * FROM oof_moments WHERE wallet=$1 AND kind='S2E'
+  ORDER BY missed_usd_dec DESC, pct_dec DESC LIMIT 1;
+  ```
+* **Worst BHD (pct)**, **Worst Route (pct)**, **Largest Idle (USD)** similar.
+
+Cache the **extremes** in `wallet_extremes(wallet PK, computed_at, json)` with TTL (e.g., 10–60 min). Recompute on new ingest.
+
+---
+
+# 8) Re-query is now O(ms): why it’s cheap next time
+
+When a second user pastes a wallet:
+
+1. **Participants index** already knows which signatures that wallet touches for the last 2y range.
+2. We **do not** hit RPC: we read `actions` + `participants` (+ price buckets) and re-run episode engine (or read cached episodes if present).
+3. Moments are either already computed (if another wallet triggered them) or computed now—but **without fetching tx bodies**.
+
+**Cost delta:** essentially **free**—just DB CPU + disk reads (all indexed, hot).
+
+---
+
+# 9) Optional 30-day rolling “hot snapshot” (further cost drop)
+
+* Run a daily job that **pre-ingests** the last 30 days of:
+
+  * Token program (Tokenkeg + Token-2022) **transfers/mint/burn**
+  * Major DEX/router programs (Orca/Raydium/Jupiter routes)
+* Store only **normalized** `actions` + `participants` for those 30 days (no raw).
+* Any wallet analyzed for the last month will hit **0 RPC** immediately.
+* For older history (30d–2y), fall back to **wallet-first** dedupe pipeline above.
+
+This hybrid is a sweet spot: **tiny fixed ingest** + **wallet-driven dedupe** for the long tail.
+
+---
+
+# 10) What happens per request (step-by-step)
+
+1. **User POSTs wallet** (`/v1/analyze`): check plan ⇒ backfill window = 2y (or less).
+2. **Coverage check**: ask DB “do we have all `(wallet, ts ≥ from_ts)` signatures?”
+
+   * If **yes** ⇒ proceed to compute.
+   * If **no** ⇒ enqueue **delta** backfill with per-run ceilings; user gets streaming progress.
+3. **Compute**:
+
+   * Pull `actions` via `participants` for `(wallet, from_ts..now)`.
+   * Run **episode engine** (lots/exits) with snapshots (fast).
+   * Run **detectors** → write `oof_moments`.
+   * Rank **extremes** → write `wallet_extremes`.
+4. **Respond**:
+
+   * `/v1/oof-moments` (paginated), `/v1/wallets/:pub/extremes` (highest), `/v1/cards/moment/:id.png` (PNG generated from template).
+5. **Persist** for reuse:
+
+   * `tx_raw` (if new), `actions`, `participants`, `episodes`, `realized_trades`, `oof_moments`.
+
+---
+
+# 11) Cost math (intuition)
+
+* **First time** a signature is seen by *any* user → one RPC tx fetch + one parse → stored forever (compressed).
+* **Next 1,000 analyses** that involve that signature → **\$0 RPC**; reads from DB.
+* Storing **normalized actions** + **participants** is tiny and **deduplicated** across all wallets.
+* Price buckets scale with **touched mints only** (not the whole chain).
+
+If your DAU grows, the **marginal cost per new wallet** decreases rapidly because overlap with already-seen signatures/mints explodes.
+
+---
+
+# 12) Practical knobs to keep it sustainable
+
+* **Per run ceilings** (per plan): max signatures, max enhanced tx, max CPU ms, max candle reads.
+* **Drop dust**: ignore notional < \$X from OOF detectors (configurable) to reduce noise.
+* **Partial results**: if ceilings hit, return partial OOF now + schedule continuation (no extra daily charge).
+* **Compaction**: after 90 days, delete raw `tx_raw` body for low-value signatures (keep `actions` + `participants` forever).
+* **Index aging**: keep dense indexes only for last 180 days; use BRIN for older partitions.
+
+---
+
+# 13) Card generation (cheap & deterministic)
+
+* Render in **Rust** (Askama/Tera → SVG → resvg → PNG).
+* Template picks:
+
+  * **Top Profit**, **Top Loss**, **Top S2E**, **Worst BHD**, **Top BadRoute**, **Largest Idle**.
+* Embed: token logo, % and \$ stats, event date, tx link, episode badge (“Episode 3 of BONK”).
+
+---
+
+# 14) What to build now (incremental plan)
+
+1. **Tables**: `tx_raw`, `actions`, `participants`, `wallet_cursors`, `lots`, `realized_trades`, `episodes`, `oof_moments`, `wallet_extremes`.
+2. **Ingest**: wallet-first dedupe; object store for `tx_raw`.
+3. **Episode engine** (FIFO lots) + **detectors** (S2E/BHD/BR/Idle).
+4. **Price buckets** (1m/5m/1h) only for **touched mints**.
+5. **30-day hot snapshot** job (optional but recommended).
+6. **Cards**: SVG templates + PNG rendering.
+
+---
+
+This architecture fulfills your requirement precisely:
+
+* **Paste wallet → scan 2y SPL activity → build entries/exits/re-entries → compute all OOF moments → rank highest** → **render shareable card**—and it does so in a way that **gets cheaper** the more users you serve.
+
+# MASTER BUILD PROMPT — OOF Backend (Rust, 2-year wallet analytics, OOF Moments)
+
+**You are an expert Rust backend engineer.** Implement a production-grade, low-cost backend that analyzes Solana wallets (up to 2 years of SPL history per plan), reconstructs entries/exits/re-entries, computes and ranks OOF Moments (S2E, BHD, BadRoute, Idle, Rug), renders shareable cards, and exposes stable REST/SSE APIs. Prioritize correctness, idempotency, and minimal recurring cost.
+
+## 0) Constraints & Principles
+
+* **Language & Stack:** Rust 1.79+, Tokio async, Axum, SQLx(Postgres `NUMERIC`), `rust_decimal` or `bigdecimal`, `ulid`, `serde`, `time`, `reqwest`, `tracing`, `prometheus`, optional `redis`. Rendering via `askama`/`tera` + `usvg`/`resvg`.
+* **Data accuracy:** All amounts in decimal (`NUMERIC(38,18)`); no f32/f64. All prices/time windows deterministic and reproducible.
+* **Idempotency:** Every write is idempotent. Primary keys: `(sig)` for tx, `(sig, log_idx)` or ULID for actions/events. Unique indexes prevent dupes.
+* **Cost posture:** Dedupe-first ingest (store each signature once), narrow normalized tables (`actions`, `participants`). Store raw JSON compressed in object store. Price buckets only for **mints we touch**. Optional 30-day “hot snapshot”.
+* **Security:** Verify Helius webhook HMAC. JWT via Dynamic JWKS or wallet-signature Bearer. Per-IP and per-wallet rate limits. CORS locked to front-end origin.
+* **Observability:** `/metrics` Prometheus; structured logs with `tracing`.
+* **SLO:** P95 moment availability < 60s post-tx (webhook→detect→render).
+
+---
+
+## 1) Workspace & Files
+
+Create this exact tree and fill with code. (You may already have the skeleton.)
+
+```
+backend/
+├─ Cargo.toml, rust-toolchain.toml, .env.example, Makefile, README.md
+├─ crates/
+│  ├─ shared/                # config, db pool, telemetry, security, types
+│  ├─ api/                   # Axum public API + SSE/WS
+│  ├─ indexer/               # webhook + optional WS subs + price refresher
+│  ├─ detectors/             # stream workers (S2E/BHD/BadRoute/Idle/Rug)
+│  ├─ workers/               # backfill, finalize, price snapshots, alerts
+│  ├─ renderer/              # SVG→PNG cards
+│  └─ anchor_sdk/            # ix builders (campaigns/staking/registry)
+├─ db/
+│  ├─ migrations/            # 0001..0010 (defined below)
+│  ├─ queries/               # sqlx `.sql` checked queries
+│  └─ seed/plans_seed.sql
+├─ configs/                  # detectors.yaml, plans.yaml, rate_limits.yaml
+├─ schemas/                  # http schemas (DTO), bus protos
+└─ infra/                    # dockerfiles, compose, observability
+```
+
+Coding standards:
+
+* Use `sqlx::query_file!` with compile-time checking.
+* DTOs in `api::dto`, no floats. Use stringified decimals in JSON responses.
+* Keyset pagination for lists (`(t_event DESC, id DESC)`).
+
+---
+
+## 2) Environment Variables (`.env.example`)
+
+```
+SOLANA_CLUSTER=mainnet-beta
+
+RPC_PRIMARY=https://rpc.helius.dev/?api-key=...
+RPC_SECONDARY=
+
+HELIUS_WEBHOOK_SECRET=...
+
+DATABASE_URL=postgres://...
+REDIS_URL=redis://...            # optional but supported
+
+ASSET_BUCKET=s3://oof-cards
+CDN_BASE=https://cdn.oof.example
+
+JUPITER_BASE_URL=https://price.jup.ag/v3
+PYTH_HERMES_SSE=https://hermes.pyth.network/v2/updates/price/stream
+
+DYNAMIC_JWKS_URL=https://.../.well-known/jwks.json
+JWT_SECRET=...
+
+OOF_TOKEN_MINT=...
+OOF_STAKING_PROGRAM_ID=...
+OOF_CAMPAIGNS_PROGRAM_ID=...
+OOF_MOMENT_REGISTRY_PROGRAM_ID=
+```
+
+---
+
+## 3) Database Schema (migrations)
+
+Create SQL migrations with these tables and indexes:
+
+### 0001\_tx\_raw\.sql
+
+* `tx_raw(sig PK, slot BIGINT, ts TIMESTAMPTZ, status TEXT, object_key TEXT, size_bytes INT)`
+
+  * `object_key` points to compressed JSON (`tx/<prefix>/<sig>.json.zst`)
+
+### 0002\_actions.sql
+
+* `actions(id PK TEXT, sig FK, log_idx INT, slot BIGINT, ts TIMESTAMPTZ, program_id TEXT, kind TEXT, mint TEXT, amount_dec NUMERIC(38,18), exec_px_usd_dec NUMERIC(38,18), route TEXT, flags_json JSONB)`
+* Indexes: `(sig, log_idx)`, `(mint, ts)`, `GIN(flags_json)`
+
+### 0003\_participants.sql
+
+* `participants(sig FK, wallet TEXT, PRIMARY KEY(sig, wallet))`
+* Index: `(wallet, sig)`
+
+### 0004\_positions.sql
+
+* `lots(lot_id PK, wallet, mint, episode_id, entry_ts, qty_initial NUMERIC, qty_remaining NUMERIC, entry_px_usd_dec NUMERIC)`
+* `realized_trades(exit_id PK, wallet, mint, episode_id, ts, qty NUMERIC, vwavg_exit_px_usd_dec NUMERIC, realized_pnl_usd_dec NUMERIC, sig)`
+
+  * Index: `(wallet, ts DESC)`
+* `episodes(episode_id PK, wallet, mint, start_ts, end_ts, basis_usd_dec NUMERIC, realized_pnl_usd_dec NUMERIC, roi_pct_dec NUMERIC)`
+
+  * Index: `(wallet, mint, start_ts)`
+
+### 0005\_moments\_extremes.sql
+
+* `oof_moments(id PK, wallet, mint, kind, t_event, window, pct_dec NUMERIC, missed_usd_dec NUMERIC, severity_dec NUMERIC, sig_ref, slot_ref BIGINT, version TEXT, explain_json JSONB, preview_png_url TEXT, nft_minted BOOL DEFAULT FALSE, nft_mint TEXT)`
+
+  * Index: `(wallet, t_event DESC)`, `(kind, t_event DESC)`
+* `wallet_extremes(wallet PK, computed_at TIMESTAMPTZ, json JSONB)`
+
+### 0006\_prices.sql
+
+* `token_prices(mint, ts, price NUMERIC, source TEXT, PRIMARY KEY(mint, ts))`
+
+### 0007\_views.sql
+
+* Create **materialized views**:
+
+  * `mv_price_1m` (≤7d), `mv_price_5m` (7–180d), `mv_price_1h` (180d–2y)
+* Consider BRIN on `ts` for large ranges.
+
+### 0008\_plans\_policy.sql
+
+* `plans(code PK, price_usd_dec NUMERIC(10,2), daily_wallets INT, backfill_days INT, cadence TEXT, alerts INT, api_rows BIGINT, perks_json JSONB)`
+* `user_plans(user_id, plan_code FK, started_at, expires_at, PRIMARY KEY(user_id, plan_code))`
+* `policy_state(user_id PK, analyses_today INT DEFAULT 0, last_reset_at TIMESTAMPTZ)`
+* `wallet_cursors(wallet PK, from_ts TIMESTAMPTZ, to_ts TIMESTAMPTZ, last_cursor_sig TEXT)`
+
+### 0009\_job\_queue.sql
+
+* `job_queue(id PK, kind TEXT, payload_json JSONB, run_after TIMESTAMPTZ, attempts INT DEFAULT 0, max_attempts INT DEFAULT 5, locked_by TEXT, locked_at TIMESTAMPTZ, status TEXT DEFAULT 'queued', created_at TIMESTAMPTZ DEFAULT NOW())`
+
+### 0010\_token\_facts.sql
+
+* `token_facts(mint PK, symbol TEXT, decimals INT, logo_url TEXT, ath_price NUMERIC, atl_price NUMERIC, liquidity_band TEXT, updated_at TIMESTAMPTZ)`
+
+Seed: `plans_seed.sql` with FREE/LITE/PRO defaults.
+
+---
+
+## 4) Ingest & Dedupe
+
+### Indexer (crates/indexer)
+
+* Route: `POST /webhooks/helius`
+
+  * Verify HMAC signature.
+  * For each signature:
+
+    * If `tx_raw.sig` absent → store compressed raw (object store) + insert `tx_raw`.
+    * Flatten provider actions → insert `actions` (idempotent by `(sig, log_idx)`).
+    * Insert `participants(sig, wallet)` for all involved pubkeys.
+* Optional: `logsSubscribe` / `accountSubscribe` for your Anchor PDAs (staking/campaigns); map to `actions(kind='anchor_event')`.
+* Price refresher: prefetch recent candles for **touched mints** (Jupiter v3); persist in `token_prices` and MVs.
+
+**Idempotency:** All inserts must be upserts (conflict do nothing/update). Use ULID for IDs.
+
+---
+
+## 5) Backfill Worker (crates/workers)
+
+* Input: wallet, `from_ts = now - min(plan.backfill_days, 730d)`.
+* Step 1: **Coverage check** against `participants` for `(wallet, ts ≥ from_ts)`.
+* Step 2: If gaps → page `getSignaturesForAddress` newest→oldest until `from_ts` or per-run ceilings.
+* Step 3: For each `sig`:
+
+  * If `tx_raw` exists → skip fetch.
+  * Else fetch, compress to object store, insert `tx_raw`, `actions`, `participants`.
+* Step 4: Enqueue **compute** (positions + detectors) for this wallet and time window.
+* Ceilings per plan: `max_signatures`, `max_enhanced_tx`, `max_cpu_ms`, `max_candle_reads`. On hitting ceilings, return partial and enqueue continuation (no extra daily quota).
+
+---
+
+## 6) Position Engine (crates/detectors::position)
+
+* Deterministic per `(wallet, mint)`:
+
+  * State: `exposure`, `lots(VecDeque<Lot>)`, `episode_id`, `realized_pnl`.
+* Transitions:
+
+  * **BUY**: if exposure==0 → start episode; push lot; update avg cost.
+  * **SELL/OUT**: pop lots FIFO, compute realized PnL per fill → `realized_trades`; if exposure→0 → close episode (`episodes`).
+  * **TRANSFER self**: move basis; no PnL.
+  * **TRANSFER to CEX**: treat as realization at mid (configurable).
+* Snapshots every N=500 events for reboot speed. Persist `lots`, `realized_trades`, `episodes`.
+
+---
+
+## 7) Price Provider (crates/detectors::prices)
+
+* Primary: **Jupiter v3**. Persist buckets: **1m** (≤7d), **5m** (7–180d), **1h** (180d–2y).
+* Optional realtime ticks (SOL/USDC) via **Pyth Hermes SSE**; cache for API/UI only.
+* Fallback: VWAP from observed swaps vs SOL/USDC if external price missing; mark confidence in `explain_json`.
+
+API:
+
+```rust
+trait PriceProvider {
+  fn at_minute(&self, mint: &str, t: OffsetDateTime) -> Option<Decimal>;
+  fn max_in(&self, mint: &str, t0: OffsetDateTime, t1: OffsetDateTime) -> Option<(OffsetDateTime, Decimal)>;
+  fn min_in(&self, mint: &str, t0: OffsetDateTime, t1: OffsetDateTime) -> Option<(OffsetDateTime, Decimal)>;
+}
+```
+
+---
+
+## 8) Detectors (crates/detectors)
+
+General:
+
+* Each detector implements:
+
+```rust
+pub trait Detector {
+  fn name(&self) -> &'static str;
+  fn version(&self) -> u8;
+  fn process(&self, ev: &ChainEvent, ctx: &Ctx) -> anyhow::Result<Option<Moment>>;
+}
+```
+
+* **S2E (Sold-Too-Early)** — triggered on **exit events**:
+
+  * `peak = max_in(mint, [t_exit, t_exit+7d])`
+  * `missed_usd = qty_exited * (peak - exit_px)`, `missed_pct = peak/exit - 1`
+  * Emit if `missed_pct ≥ 0.25 && missed_usd ≥ 25`
+  * `severity = clamp((missed_pct)/0.75, 0..1)`
+* **BHD (Bag-Holder Drawdown)** — triggered on **buy lots**:
+
+  * `trough = min_in(mint, [t_buy, t_buy+7d])`
+  * `dd_pct = trough/entry - 1` (≤ −0.30 → emit)
+  * `severity = clamp((|dd_pct| - 0.30)/0.50, 0..1)`
+* **BadRoute** — every swap:
+
+  * Compare executed mid vs best Jupiter quote @ block-minute.
+  * `worse_pct = exec_mid/best_mid - 1` (≥ 0.01 → emit)
+* **Idle Yield** — continuous OOF balance windows:
+
+  * `missed = bal * apr * days/365 * avg_px` (≥ 25 → emit)
+* **Rug** (optional) — from `token_facts` (ATH collapse + persistence); if holding across onset → emit worst.
+
+All moments write to `oof_moments` and publish `"new_oof_moment"` SSE/WS.
+
+---
+
+## 9) Ranking “Highest” Moments & Extremes
+
+* **Highest win/loss (\$)** from `realized_trades`:
+
+```sql
+SELECT * FROM realized_trades WHERE wallet=$1 ORDER BY realized_pnl_usd_dec DESC LIMIT 1;
+SELECT * FROM realized_trades WHERE wallet=$1 ORDER BY realized_pnl_usd_dec ASC  LIMIT 1;
+```
+
+* **Top S2E**:
+
+```sql
+SELECT * FROM oof_moments WHERE wallet=$1 AND kind='S2E'
+ORDER BY missed_usd_dec DESC, pct_dec DESC LIMIT 1;
+```
+
+* Worst **BHD** (pct), **BadRoute** (pct), largest **Idle** (USD) analogous.
+* Cache to `wallet_extremes` (`computed_at`, `json`) with TTL 10–60 min.
+
+---
+
+## 10) Public API (crates/api)
+
+Routes (Axum):
+
+* `POST /v1/analyze` → `{ wallets:[pubkey], planCode? }`
+
+  * AuthN (JWT or wallet sig) + AuthZ (quota).
+  * Enqueue backfill/compute with ceilings based on plan.
+  * Return `{ jobId }`.
+* `GET /v1/analyze/:job/stream` (SSE): events `progress`, `moment`, `done`.
+* `GET /v1/moments?wallet=&kinds=&since=&min_usd=&limit=&cursor=`
+
+  * Keyset pagination (`(t_event, id)`), string decimals.
+* `GET /v1/moments/:id` → detailed DTO with provenance (`sig_ref`, `slot_ref`, `price_source`, confidence).
+* `GET /v1/wallets/:pub/summary` → holdings (current), realized PnL, counts by kind, last analyzed range.
+* `GET /v1/wallets/:pub/extremes` → top win/loss/S2E/BHD/BadRoute/Idle with `card.shareImageUrl`.
+* `GET /v1/cards/moment/:id.png?theme=&size=` → PNG (renderer crate).
+* `POST /v1/cards/moment/:id/mint` → returns unsigned base64 instruction(s) or tx for user wallet to sign.
+* `GET /v1/tokens/:mint/prices?tf=1m|5m|1h&since=ISO`
+* `GET /v1/leaderboard?period=7d|30d`
+* `GET /v1/health` (DB/RPC/Redis checks), `/metrics` (Prometheus).
+
+Middleware:
+
+* `auth.rs` (Dynamic JWKS / wallet-sig), `rate_limit.rs`, `errors.rs`.
+* SSE/WS multiplexing in `ws_sse.rs` (topics: `"new_oof_moment"`, `"price_tick"`, `"campaign_update"`).
+
+DTO rules:
+
+* All numeric amounts serialized as strings.
+* Include `moment.version`, `price_source`, and `confidence` in responses.
+
+---
+
+## 11) Renderer (crates/renderer)
+
+* Provide `render_moment_card(moment: MomentDTO, theme: &str, size: &str) -> Result<Vec<u8>>`.
+* Implement with SVG templates + `resvg` → PNG **1200×630** default.
+* Store to object store at `cards/moments/{id}.png`; return `CDN_BASE/...`.
+
+---
+
+## 12) Plans, Quotas, Cost Control
+
+`configs/plans.yaml` (example):
+
+* **FREE**: `daily_wallets=2`, `backfill_days=180`, `cadence=manual`, `alerts=0`, `api_rows=0`
+* **LITE** (\~\$2): `daily_wallets=5`, `backfill_days=365`, `cadence=weekly`
+* **PRO** (\~\$10): `daily_wallets=25`, `backfill_days=730`, `cadence=daily`
+* **Boosts** with \$OOF staking: +50% daily wallets, −50% card mint fee, +alerts, fast lane priority.
+
+Per-run ceilings enforced in workers; on hit, return partial + enqueue continuation (no extra quota).
+
+---
+
+## 13) Tests & Fixtures
+
+* `crates/detectors/src/tests/golden_wallet_4y.json`: synthetic 4-year wallet covering re-entries, profits, losses, rugs, bad routes.
+* `detectors_test.rs`: asserts counts and top extremes (S2E/BHD etc), reproducible given fixed price windows.
+* SQLx offline (`.sqlx/`) for query checking.
+* Unit tests for HMAC verify, JWT JWKS cache, price bucket choose logic.
+
+---
+
+## 14) DevOps
+
+* Dockerfiles per crate + `infra/docker/docker-compose.dev.yml` (Postgres, API, Indexer, Detectors).
+* Make targets: `dev-up`, `migrate`, `seed`, `run-api`, `run-indexer`, `run-detectors`, `test`.
+* Prometheus config + example Grafana dashboard JSON.
+* Health checks for Railway/Fly deployments.
+
+---
+
+## 15) Acceptance Criteria (what “done” means)
+
+1. **Paste wallet → Analyze (2y)** returns streaming SSE with progress and at least one detected moment on the golden fixture within **60s** locally.
+2. **Moments list** paginates and returns stringified decimals; provenance includes `sig_ref`, `slot_ref`, `price_source`.
+3. **Extremes endpoint** returns top win/loss/S2E/BHD/BadRoute/Idle with stable ordering and ties resolved deterministically.
+4. **Card PNG** renders successfully and caches at `preview_png_url`.
+5. **Backfill dedupe** verified: second analysis of a wallet that shares signatures **does not** call RPC for already-stored `sig`.
+6. **Plans/quotas** enforced; FREE limited to 2 wallets/day and 180d; PRO allows 2y depth.
+7. **Observability**: `/metrics` exposes ingest rate, detector counts, queue lag, render count; `/v1/health` green.
+
+---
+
+## 16) Implementation Order (for the agent)
+
+1. Migrations 0001..0010 + seed plans.
+2. `crates/shared`: config, db pool, telemetry, security (HMAC/JWKS), common types.
+3. Indexer webhook → normalize + store (`tx_raw`, `actions`, `participants`).
+4. Workers backfill (wallet-first dedupe) + price buckets (Jupiter v3).
+5. Position engine + derived tables (lots, realized\_trades, episodes).
+6. Detectors (S2E, BHD, BadRoute, Idle; optional Rug) + SSE publish.
+7. API routes (analyze, moments, extremes, wallet summary).
+8. Renderer (SVG→PNG) + `/cards/moment/:id.png`.
+9. AuthZ, rate limits, quotas; metrics; health.
+10. Tests: golden wallet fixture, detectors, extremes.
+
+**Deliver code that compiles with `cargo build` and passes `cargo test`.** Favor small, well-typed modules. Document public functions.
+
+
+
+
+Here’s a tight survey of what already exists—both **services** (what users see today) and **repos/SDKs** (what you can build on)—so we don’t reinvent the wheel and can cherry-pick the best pieces for OOF.
+
+# What already does something similar?
+
+## A) Production “wallet analytics” products (PnL, portfolio, trade insights)
+
+* **Step Finance** — long-standing Solana portfolio/PnL dashboard; connect or paste a wallet and get historical balances, positions, and execution via a unified UI. Good UX baseline for “paste a wallet → get insights.” ([Step Finance][1], [Step Finance][2])
+* **SonarWatch** — multi-chain dashboard; widely used for Solana portfolio analytics and yields (SolanaCompass profile cites large query volume). Useful for feature parity references (positions, yields, alerts). ([Sonar Watch][3], [solanacompass.com][4])
+* **Birdeye** — trader-oriented analytics with wallet PnL views, “profitable traders,” and deep trade pages. Their “Find Trades” + portfolio/PnL features are close to the “OOF moments” feel (surface best/worst trades). ([birdeye.so][5], [solanacompass.com][6])
+
+> These show demand for: paste-address onboarding, per-token PnL, top wins/losses, and shareable “brag/ouch” moments. None expose an open “sold-too-early” detector; that’s your differentiator.
+
+## B) Data platforms you can lean on (for history & price)
+
+* **Flipside** — decoded Solana tables (transactions/instructions) you can query; good for prototyping backfills and validation. ([flipsidecrypto.xyz][7], [docs.flipsidecrypto.xyz][8])
+* **Dune (Solana)** — Solana is a first-class “chain” on Dune; thousands of public dashboards. Good for research/benchmarks and, if needed, a data backstop for long horizons. ([dune.com][9], [dune.com][10])
+* **Jupiter Price API v3** — the current “one source of truth” for Solana token prices; ideal for your entry/exit pricing and peak/trough windows. ([dev.jup.ag][11])
+
+## C) Indexing/streaming toolchains (how others ingest at scale)
+
+* **Helius Webhooks** — battle-tested “parsed actions” webhooks for Solana; trivial to consume and cheap to run. (There’s also a small Rust tutorial repo you can crib from.) ([Helius][12], [GitHub][13])
+* **Helius Rust SDK** — async Rust client for Helius APIs, handy when you need Enhanced Transactions/backfills on demand. ([GitHub][14])
+* **Yellowstone gRPC (Geyser)** — low-latency streaming directly from Solana’s Geyser; production implementations and Rust clients exist (rpcpool’s repo + QuickNode’s Rust guides). Great if you later need sub-second TVL/positions or program-specific mirroring. ([GitHub][15], [QuickNode][16])
+
+## D) Open-source repos you can study/fork (closest to “wallet PnL”/indexers)
+
+* **hsyndeniz/solana-indexer** — end-to-end indexer (Geyser → Kafka → Postgres) showing how to structure a chain index feed and database. Architecture patterns transfer well even if we re-implement in Rust. ([GitHub][17])
+* **Solana PnL bots/scripts** — several OSS scripts compute wallet PnL over time; not production-grade, but useful to validate lot-matching and ROI math quickly (e.g., Solana-Wallet-Address-PNL-Bot; token PnL script using Helius). ([GitHub][18])
+
+---
+
+# What these give you vs. what’s missing for OOF
+
+* **They already provide:** portfolio aggregation, per-wallet PnL, trade histories, and sometimes “profitable traders” views—good UX/feature references. ([Step Finance][1], [birdeye.so][5])
+* **They don’t provide (publicly):**
+
+  * Episode/lot-aware **“Sold-Too-Early”** & **Bag-Holder Drawdown** detectors with 7d/30d windows.
+  * **Per-exit** missed-opportunity math tied to **block-time prices** and **shareable card generation**.
+  * **Deterministic provenance** (signature/slot + window price source) exposed as an API you can mint as an NFT.
+
+That gap is exactly where OOF can stand out.
+
+---
+
+# Strong “build-from” recommendations
+
+If you want the **shortest path to a working, cheap, Rust backend**:
+
+1. **Webhook-first ingest** (cheapest, simplest):
+
+   * Start from the **Helius Webhooks** pattern (and the small Rust webhook tutorial repo). This gets you parsed swaps/transfers without building Geyser infra on day one. ([Helius][12], [GitHub][13])
+   * Use **Helius Rust SDK** only for targeted backfills (older signatures or ambiguous txs). ([GitHub][14])
+
+2. **Prices**: **Jupiter Price API v3** for entry/exit candle lookups + peak/trough windows; it’s the most aligned with Solana liquidity today. ([dev.jup.ag][11])
+
+3. **If/when you need real-time mirroring** (staking/campaign PDAs, leaderboard freshness): plug **Yellowstone gRPC** with the open client/examples (rpcpool/QuickNode Rust guides). It’s a bolt-on to your webhook pipeline later. ([GitHub][15], [QuickNode][16])
+
+4. **Reference indexer architecture**: skim **hsyndeniz/solana-indexer** for how people wire ingest → queue → Postgres; we’ll implement the same *shape* in Rust/Axum/Tokio. ([GitHub][17])
+
+---
+
+If you want, next I can synthesize these into a **Rust-first blueprint** (file tree + data model + exact endpoints) that reuses Helius Webhooks + Jupiter v3, and adds our **OOF detectors** + **card renderer** on top—keeping infra/cost minimal while matching the UX you want.
+
+[1]: https://www.step.finance/?utm_source=chatgpt.com "Step Finance: The Front Page of Solana"
+[2]: https://app.step.finance/?utm_source=chatgpt.com "Step Finance: Solana Dashboard"
+[3]: https://sonar.watch/?utm_source=chatgpt.com "SonarWatch"
+[4]: https://solanacompass.com/projects/sonarwatch?utm_source=chatgpt.com "SonarWatch"
+[5]: https://birdeye.so/?utm_source=chatgpt.com "Birdeye: Crypto Trading Data Aggregator Tool for Traders"
+[6]: https://www.solanacompass.com/projects/birdeye?utm_source=chatgpt.com "Birdeye: Solana's Premier Data Analytics Platform"
+[7]: https://flipsidecrypto.xyz/fc/tutorials/decoded-solana-data-on-flipside?utm_source=chatgpt.com "Decoded Solana Data on Flipside | Research"
+[8]: https://docs.flipsidecrypto.xyz/data/data-products/data-studio-sql-analysts/tutorials/tutorials/solana-tutorials/exploring-transactions-in-solana.events?utm_source=chatgpt.com "Exploring Transactions in solana.events"
+[9]: https://dune.com/chains/solana?utm_source=chatgpt.com "Solana Analytics with Dune"
+[10]: https://www.dune.com/lamprosdao/solana-dashboard?utm_source=chatgpt.com "Solana Dashboard"
+[11]: https://dev.jup.ag/docs/price-api/v3?utm_source=chatgpt.com "Price API V3 (Beta) - Jupiter Developer Docs"
+[12]: https://www.helius.dev/docs/webhooks?utm_source=chatgpt.com "Solana Webhooks: Real-Time Blockchain Event Notifications"
+[13]: https://github.com/wkennedy/helius-webhooks-tutorial?utm_source=chatgpt.com "wkennedy/helius-webhooks-tutorial: Rust and Typescript ..."
+[14]: https://github.com/helius-labs/helius-rust-sdk?utm_source=chatgpt.com "Asynchronous Helius Rust SDK"
+[15]: https://github.com/rpcpool/yellowstone-grpc?utm_source=chatgpt.com "rpcpool/yellowstone-grpc: solana geyser grpc service"
+[16]: https://www.quicknode.com/guides/solana-development/tooling/geyser/yellowstone-rust?utm_source=chatgpt.com "Monitor Solana Programs with Yellowstone Geyser gRPC ..."
+[17]: https://github.com/hsyndeniz/solana-indexer?utm_source=chatgpt.com "hsyndeniz/solana-indexer"
+[18]: https://github.com/henrytirla/Solana-Wallet-Address-PNL-Bot?utm_source=chatgpt.com "Solana-Wallet-Address-PNL-Bot"
+
+
+Awesome—picking up from the market survey, here’s the **complete Rust-first blueprint** that stitches together everything we discussed into a production, low-cost backend that: (1) ingests once and reuses forever, (2) analyzes up to **2 years** per plan, (3) reconstructs **entries/exits/re-entries**, (4) computes and ranks **OOF moments**, and (5) renders **shareable cards**.
+
+I’ve organized this so you can give it to an engineer (or an AI agent) and get working code with minimal guesswork.
+
+---
+
+# 1) Architecture at a glance
+
+```
+┌───────────────────────────────────────────────────────────────────────┐
+│  Client (Next.js)                                                     │
+│    Paste wallet → call /v1/analyze → watch SSE → fetch lists/cards    │
+└───────────────────────────────────────────────────────────────────────┘
+               │
+               ▼
+┌───────────────────────────────────────────────────────────────────────┐
+│  API (Axum)                                                           │
+│   /v1/analyze, /v1/moments, /v1/wallets/:pub/extremes, cards, tokens  │
+│   Auth (Dynamic/wallet-sig) • SSE/WS • Rate limits • Quotas          │
+└───────────────────────────────────────────────────────────────────────┘
+               │                                 ▲
+               ▼                                 │ WS/SSE
+┌─────────────────────────────┐        ┌───────────────────────────────┐
+│  Workers (Tokio)            │        │  Renderer (SVG→PNG via resvg) │
+│  backfill • finalize • price │        │  store PNG → S3/R2 (CDN)      │
+└─────────────────────────────┘        └───────────────────────────────┘
+               │
+               ▼
+┌───────────────────────────────────────────────────────────────────────┐
+│  Indexer (Axum + Tokio)                                               │
+│   • Webhook: Helius → normalize → store (idempotent)                  │
+│   • Optional WS: logs/account subscribe for your programs             │
+│   • Price refresher (Jupiter v3, Pyth SSE)                            │
+└───────────────────────────────────────────────────────────────────────┘
+               │
+               ▼
+┌───────────────────────────────────────────────────────────────────────┐
+│  DB (Postgres) + Object Store (R2/S3)                                  │
+│   tx_raw (pointer) • actions • participants • positions/lots/exits     │
+│   episodes • oof_moments • prices (1m/5m/1h) • wallet_extremes         │
+│   plans/quotas • job_queue • token_facts                               │
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+**Cost posture:** webhook-first ingest (cheap), wallet-first dedupe, narrow normalized tables, compressed raw tx in object store, price buckets only for **touched mints**, optional rolling 30-day “hot snapshot”.
+
+---
+
+# 2) Rust workspace
+
+```
+backend/
+├─ Cargo.toml                 # workspace
+├─ rust-toolchain.toml
+├─ .env.example
+├─ Makefile
+│
+├─ crates/
+│  ├─ shared/                 # config, db, redis, telemetry, security (JWKS/HMAC)
+│  ├─ api/                    # Axum REST+SSE+WS (public)
+│  ├─ indexer/                # Webhook + optional WS subs
+│  ├─ detectors/              # S2E, BHD, BadRoute, Idle + engine
+│  ├─ workers/                # backfill, finalize windows, price fills, alerts
+│  ├─ renderer/               # SVG templates + resvg → PNG
+│  └─ anchor_sdk/             # thin clients & ix builders (campaigns/staking)
+│
+├─ db/
+│  ├─ migrations/*.sql
+│  └─ queries/*.sql
+│
+├─ configs/
+│  ├─ detectors.yaml          # thresholds (pct/$), windows, versions
+│  ├─ plans.yaml              # FREE/Lite/Std/Pro, daily_wallets, backfill_days
+│  └─ rate_limits.yaml
+└─ infra/
+   ├─ docker-compose.dev.yml  # PG, API, Indexer, Detectors
+   └─ Dockerfiles
+```
+
+Critical crates: `axum`, `sqlx`(postgres, runtime=tokio, features=decimal/json), `tokio`, `serde`, `ulid`, `time`, `anyhow`, `thiserror`, `tracing`, `prometheus`, `reqwest`, `anchor-client`, `solana-sdk`, `usvg`/`resvg`, `askama`/`tera`.
+
+---
+
+# 3) Data model (cheapest viable for 2-year analysis)
+
+## 3.1 Raw and normalized (dedupe-first)
+
+```sql
+-- 1) Raw body pointer (compressed in object store)
+CREATE TABLE tx_raw(
+  sig TEXT PRIMARY KEY,
+  slot BIGINT,
+  ts TIMESTAMPTZ,
+  status TEXT,
+  object_key TEXT,       -- s3://bucket/tx/ab/sig.json.zst
+  size_bytes INT
+);
+
+-- 2) Actions (shared across all wallets)
+CREATE TABLE actions(
+  id TEXT PRIMARY KEY,   -- ULID
+  sig TEXT REFERENCES tx_raw(sig),
+  log_idx INT,
+  slot BIGINT,
+  ts TIMESTAMPTZ,
+  program_id TEXT,
+  kind TEXT,             -- swap|transfer|mint|burn|lp_add|lp_remove|anchor_event
+  mint TEXT,             -- SOL normalized to So111...
+  amount_dec NUMERIC(38,18),
+  exec_px_usd_dec NUMERIC(38,18), -- if available (or computed)
+  route TEXT,            -- Orca/Raydium/Jupiter path
+  flags_json JSONB
+);
+CREATE INDEX ON actions (sig, log_idx);
+CREATE INDEX ON actions (mint, ts);
+
+-- 3) Participants: connects signature <> involved wallets
+CREATE TABLE participants(
+  sig TEXT REFERENCES tx_raw(sig),
+  wallet TEXT,
+  PRIMARY KEY (sig, wallet)
+);
+CREATE INDEX ON participants (wallet, sig);
+```
+
+> **Why this is cheap:** each signature is fetched **once** ever; normalized **once**; every future wallet analysis reuses it.
+
+## 3.2 Derived: positions, lots, exits, episodes
+
+```sql
+CREATE TABLE lots(
+  lot_id TEXT PRIMARY KEY,
+  wallet TEXT, mint TEXT,
+  episode_id TEXT,
+  entry_ts TIMESTAMPTZ,
+  qty_initial NUMERIC(38,18),
+  qty_remaining NUMERIC(38,18),
+  entry_px_usd_dec NUMERIC(38,18)
+);
+
+CREATE TABLE realized_trades(
+  exit_id TEXT PRIMARY KEY,
+  wallet TEXT, mint TEXT,
+  episode_id TEXT,
+  ts TIMESTAMPTZ,
+  qty NUMERIC(38,18),
+  vwavg_exit_px_usd_dec NUMERIC(38,18),
+  realized_pnl_usd_dec NUMERIC(38,18),
+  sig TEXT
+);
+CREATE INDEX ON realized_trades (wallet, ts DESC);
+
+CREATE TABLE episodes(
+  episode_id TEXT PRIMARY KEY,
+  wallet TEXT, mint TEXT,
+  start_ts TIMESTAMPTZ,
+  end_ts TIMESTAMPTZ,
+  basis_usd_dec NUMERIC(38,18),
+  realized_pnl_usd_dec NUMERIC(38,18),
+  roi_pct_dec NUMERIC(38,18)
+);
+CREATE INDEX ON episodes (wallet, mint, start_ts);
+```
+
+## 3.3 Moments & extremes
+
+```sql
+CREATE TABLE oof_moments(
+  id TEXT PRIMARY KEY,
+  wallet TEXT,
+  mint TEXT,
+  kind TEXT,              -- S2E|BHD|BAD_ROUTE|IDLE_YIELD|RUG
+  t_event TIMESTAMPTZ,
+  window TEXT,            -- 7d|30d
+  pct_dec NUMERIC(38,18),
+  missed_usd_dec NUMERIC(38,18),
+  severity_dec NUMERIC(38,18),
+  sig_ref TEXT,
+  slot_ref BIGINT,
+  version TEXT,
+  explain_json JSONB,
+  preview_png_url TEXT,
+  nft_minted BOOLEAN DEFAULT FALSE,
+  nft_mint TEXT
+);
+CREATE INDEX ON oof_moments (wallet, t_event DESC);
+CREATE INDEX ON oof_moments (kind, t_event DESC);
+
+CREATE TABLE wallet_extremes(
+  wallet TEXT PRIMARY KEY,
+  computed_at TIMESTAMPTZ,
+  json JSONB              -- cached highest win/loss/S2E/BHD/BR/Idle
+);
+```
+
+## 3.4 Pricing (bucketed)
+
+```sql
+CREATE TABLE token_prices(
+  mint TEXT,
+  ts TIMESTAMPTZ,
+  price NUMERIC(38,18),
+  source TEXT,
+  PRIMARY KEY (mint, ts)
+);
+-- Materialized views (created in migrations)
+-- mv_price_1m (0–7d), mv_price_5m (7–180d), mv_price_1h (180d–2y)
+```
+
+---
+
+# 4) Ingest & backfill (2-year window, tier-aware)
+
+## 4.1 Wallet-first backfill (dedupe)
+
+**Inputs:** wallet W, `from_ts = now - min(2y, plan.backfill_days)`
+
+1. Check **coverage**: `SELECT MIN(ts), MAX(ts) FROM participants WHERE wallet=W AND ts>=from_ts`
+
+   * If gaps exist, enqueue **delta** pages of `getSignaturesForAddress` (newest→oldest) until `from_ts` or ceilings.
+2. For each new `sig`:
+
+   * If `tx_raw(sig)` exists → skip fetch.
+   * Else fetch once, compress to object store, insert `tx_raw`.
+   * Parse to `actions`, insert `participants(sig, each_wallet)` (**all** wallets seen).
+3. Commit cursor in `wallet_cursors` to allow resumable analysis.
+
+**Effect:** next time **any wallet** touches these sigs, **zero RPC cost**.
+
+## 4.2 Optional: 30-day hot snapshot
+
+* Nightly job pulls **last 30 days** for token/DEX programs; writes `actions`+`participants` without storing raw body.
+* New wallets analyzing “recent activity” hit DB exclusively.
+
+---
+
+# 5) Position engine (per wallet, per mint)
+
+Deterministic state machine in Rust:
+
+```rust
+struct Lot { lot_id: Ulid, entry_ts: OffsetDateTime, qty_initial: Dec, qty_remaining: Dec, entry_px: Dec }
+struct PosState { exposure: Dec, lots: VecDeque<Lot>, episode: Option<Ulid>, realized_pnl: Dec }
+
+fn on_buy(state: &mut PosState, q: Dec, px: Dec, t: Time) { ... }
+fn on_sell(state: &mut PosState, q: Dec, px: Dec, t: Time, sig: &str) -> ExitEvent { ... }
+fn on_transfer_self(...) { /* move basis, no PnL */ }
+fn on_transfer_cex(...)  { /* treat as realization at mid */ }
+```
+
+* **Start episode** when exposure 0→>0, **end episode** on >0→0.
+* **FIFO** matching by default (config switch allows AVG).
+* **Snapshots** every N=500 events to accelerate replays.
+* Persist `lots`, `realized_trades`, `episodes`.
+
+---
+
+# 6) Detectors (OOF)
+
+All detectors are **pure** functions over `ChainEvent` + `PriceProvider` and **versioned**.
+
+* **S2E (exit trigger)**
+  `peak = max_in(mint, t_exit..t_exit+7d)` → `missed_usd = qty_exited*(peak - exit_px)`
+  Emit if `missed_pct ≥ θ_pct && missed_usd ≥ θ_usd`.
+
+* **BHD (buy trigger)**
+  `trough = min_in(mint, t_buy..t_buy+7d)` → `dd_pct = trough/entry - 1`
+  Emit if `dd_pct ≤ −θ_dd`.
+
+* **Bad Route (swap)**
+  `worse_pct = exec_mid / best_mid - 1` (nearest minute Jupiter quote)
+  Emit if `worse_pct ≥ θ_route`.
+
+* **Idle Yield**
+  Continuous idle windows on \$OOF balance;
+  `missed_usd = bal * apr * days/365 * avg_px` ≥ `θ_idle`.
+
+* **Rug** (optional)
+  Token facts show collapse vs ATH; if held across onset, emit worst rug.
+
+Each emit → write `oof_moments` + publish WS/SSE `"new_oof_moment"`.
+
+---
+
+# 7) Highest moments & extremes (wallet-wide)
+
+**Queries (keyset & indexed):**
+
+* Highest **win** / **loss** (\$):
+
+  ```sql
+  SELECT * FROM realized_trades WHERE wallet=$1 ORDER BY realized_pnl_usd_dec DESC LIMIT 1;
+  SELECT * FROM realized_trades WHERE wallet=$1 ORDER BY realized_pnl_usd_dec ASC  LIMIT 1;
+  ```
+
+* Top **S2E**:
+
+  ```sql
+  SELECT * FROM oof_moments WHERE wallet=$1 AND kind='S2E'
+  ORDER BY missed_usd_dec DESC, pct_dec DESC LIMIT 1;
+  ```
+
+* Worst **BHD** (pct), Worst **BadRoute** (pct), Largest **Idle** (USD) similarly.
+
+Cache into `wallet_extremes` (`computed_at`, `json`) with **TTL=10–60m**.
+
+---
+
+# 8) Price provider (bucketed, deterministic)
+
+* **Jupiter v3** for consolidated prices; write 1m/5m/1h buckets for **mints seen in actions**.
+* **Pyth SSE** optional for hot ticks (SOL/USDC) cached in memory/Redis; not needed for backfill.
+* **Fallback**: build VWAP from local swaps vs SOL/USDC if external price missing; mark `explain_json.price_source="vwap_local"`.
+
+APIs:
+
+```rust
+trait PriceProvider {
+  fn at_minute(&self, mint: &Pubkey, t: Time) -> Option<Dec>;
+  fn max_in(&self, mint: &Pubkey, t0: Time, t1: Time) -> Option<(Time, Dec)>;
+  fn min_in(&self, mint: &Pubkey, t0: Time, t1: Time) -> Option<(Time, Dec)>;
+}
+```
+
+---
+
+# 9) REST/SSE/WS API (stable contracts)
+
+* `POST /v1/analyze { wallets[] }` → enqueues **wallet-first backfill** (2y window based on plan) and starts compute.
+* `GET /v1/analyze/:job/stream` (SSE): `progress`, `moment`, `done`.
+* `GET /v1/moments?wallet=&kinds=&since=&min_usd=&limit=&cursor=` (keyset pagination).
+* `GET /v1/wallets/:pub/extremes` → top win/loss/S2E/BHD/BadRoute/Idle with card URLs.
+* `GET /v1/cards/moment/:id.png?theme=&size=` → PNG.
+* `POST /v1/cards/moment/:id/mint` → compressed NFT mint (optional).
+* `GET /v1/tokens/:mint/prices?tf=1m|5m|1h&since=ISO`.
+* `GET /v1/leaderboard?period=7d|30d`.
+* `GET /v1/health`, `/metrics`.
+
+**Auth**: Dynamic JWKS or wallet-signature. **Rate limits** + **plan quotas** enforced; target-wallet proof for priority compute.
+
+---
+
+# 10) Card rendering (Rust-only)
+
+* Templates in **SVG** (Askama/Tera) mirroring your UI’s moment card (title, logo, sparkline, KPIs).
+* **resvg** rasterizes to **1200×630 PNG**.
+* Store `cards/moments/{id}.png` → set `preview_png_url`.
+* Metadata for NFT includes moment digest `{wallet, mint, kind, t_event, sig_ref, stats, png_url}`.
+
+---
+
+# 11) Cost controls & plan logic
+
+* **Plans** (configs/plans.yaml):
+
+  * FREE: 2 wallets/day, backfill\_days=180 (6m)
+  * LITE (\~\$2): 5 wallets/day, backfill\_days=365
+  * PRO (\~\$10): 25 wallets/day, backfill\_days=730 (2y)
+  * Boosts with **\$OOF staking** (+50% daily wallets, −50% mint fee, +alerts, fast lane).
+* **Per-run ceilings** (by plan): `max_signatures`, `max_enhanced_tx`, `max_cpu_ms`, `max_candle_reads`.
+  If a ceiling hits → return partial + enqueue continuation (no extra daily charge).
+
+---
+
+# 12) Observability, correctness, resilience
+
+* **Prometheus**: ingest rate, event lag, price cache hit, detector counts by kind, queue depth, job latency, renderer count, mint success/fail.
+* **Tracing**: spans across ingest→normalize→positions→detectors→render.
+* **Finality policy**: mark new moments “soft” until N slots; finalize after N.
+* **Replays**: roll back derived rows from a `(wallet, from_slot)`; resume from nearest snapshot.
+
+---
+
+# 13) Implementation order (2–3 sprints)
+
+**Sprint 1**
+
+* Migrations (raw/normalized/participants/prices basic).
+* Indexer webhook + normalize; object store for raw tx.
+* Wallet-first backfill worker (with ceilings).
+* Price buckets (1m/5m/1h) for touched mints.
+* Position engine (FIFO), episodes/lots/exits persist.
+
+**Sprint 2**
+
+* Detectors (S2E/BHD/BadRoute/Idle) + versions.
+* Extremes endpoint + cache.
+* Renderer crate (SVG → PNG) + storage; GET card PNG.
+* SSE stream for analyze jobs.
+* Basic auth, rate limits, quotas.
+
+**Sprint 3**
+
+* Optional 30-day hot snapshot ingest.
+* RUG detector + token\_facts maintenance.
+* cNFT mint (Metaplex UMI) + optional on-chain attestation.
+* Leaderboard + alerts.
+* Hardening: retries, idempotency, reorg handling, metrics dashboards.
+
+---
+
+# 14) Example: critical code signatures
+
+**Detectors trait**
+
+```rust
+pub trait Detector {
+    fn name(&self) -> &'static str;
+    fn version(&self) -> u8;
+    fn process(&self, ev: &ChainEvent, ctx: &Ctx) -> anyhow::Result<Option<MomentOut>>;
+}
+```
+
+**Episode transitions (sell)**
+
+```rust
+fn on_sell(state: &mut PosState, mut q: Dec, px: Dec, t: Time, sig: &str) -> ExitEvent {
+    let mut realized = dec!(0);
+    let mut exited = dec!(0);
+    while q > dec!(0) {
+        let lot = state.lots.front_mut().unwrap();
+        let take = q.min(lot.qty_remaining);
+        realized += (px - lot.entry_px) * take;
+        lot.qty_remaining -= take;
+        exited += take;
+        q -= take;
+        if lot.qty_remaining == dec!(0) { state.lots.pop_front(); }
+    }
+    state.exposure -= exited;
+    state.realized_pnl += realized;
+    if state.exposure == dec!(0) { /* close episode */ }
+    ExitEvent { ts: t, qty_exited: exited, vwavg_exit_px: px, realized_usd: realized, sig: sig.to_string() }
+}
+```
+
+**Price max/min (bucket choose)**
+
+```sql
+-- choose mv_price_1m/5m/1h based on (t1 - t0)
+SELECT MAX(price) FROM mv_price_1m WHERE mint=$1 AND ts BETWEEN $2 AND $3;
+```
+
+**Extremes fetch**
+
+```sql
+-- Top S2E
+SELECT id, mint, missed_usd_dec, pct_dec, t_event, sig_ref
+FROM oof_moments
+WHERE wallet=$1 AND kind='S2E'
+ORDER BY missed_usd_dec DESC, pct_dec DESC
+LIMIT 1;
+```
+
+---
+
+# 15) Why this nails your requirements
+
+* **Paste wallet → 2-year analysis** with **entries/exits/re-entries** and **OOF moments**, then **rank highest**: ✅
+* **Low recurring cost**: dedupe-first ingest, object-store raw, narrow normalized events, bucketed prices only for touched mints, optional 30-day hot snapshot: ✅
+* **Accuracy & repeatability**: deterministic lots, versioned detectors, time-accurate prices, provenance to `(sig,slot)` in every moment: ✅
+* **Delight**: instant “Top Win / Top OOF” cards, cNFT mint, SSE progress, WS updates: ✅
+
+---
+
+If you want, I can generate **starter Rust files** (Axum routes, SQLx migrations, detector scaffolds, SVG template) matching this blueprint so you can `cargo run` the stack and begin integrating with your frontend immediately.
+
+# File structure (Rust workspace)
+
+```
+backend/
+├─ Cargo.toml
+├─ rust-toolchain.toml
+├─ .env.example
+├─ Makefile
+├─ README.md
+│
+├─ crates/
+│  ├─ shared/
+│  │  ├─ Cargo.toml
+│  │  └─ src/
+│  │     ├─ config.rs
+│  │     ├─ db.rs
+│  │     ├─ redis.rs
+│  │     ├─ telemetry.rs
+│  │     ├─ idl.rs
+│  │     ├─ constants.rs
+│  │     ├─ errors.rs
+│  │     ├─ utils.rs
+│  │     ├─ security/
+│  │     │  ├─ dynamic_jwks.rs
+│  │     │  └─ helius_hmac.rs
+│  │     └─ types/
+│  │        ├─ chain.rs
+│  │        ├─ price.rs
+│  │        ├─ moment.rs
+│  │        └─ policy.rs
+│  │
+│  ├─ api/
+│  │  ├─ Cargo.toml
+│  │  └─ src/
+│  │     ├─ main.rs
+│  │     ├─ state.rs
+│  │     ├─ ws_sse.rs
+│  │     ├─ middleware/
+│  │     │  ├─ auth.rs
+│  │     │  ├─ rate_limit.rs
+│  │     │  └─ errors.rs
+│  │     ├─ services/
+│  │     │  ├─ portfolio.rs
+│  │     │  ├─ pricing.rs
+│  │     │  └─ proofs.rs
+│  │     ├─ dto/
+│  │     │  ├─ analyze.rs
+│  │     │  ├─ moment.rs
+│  │     │  └─ wallet.rs
+│  │     └─ routes/
+│  │        ├─ health.rs
+│  │        ├─ analyze.rs
+│  │        ├─ moments.rs
+│  │        ├─ cards.rs
+│  │        ├─ wallets.rs
+│  │        ├─ tokens.rs
+│  │        ├─ campaigns.rs
+│  │        ├─ leaderboard.rs
+│  │        └─ webhooks/
+│  │           └─ helius.rs
+│  │
+│  ├─ indexer/
+│  │  ├─ Cargo.toml
+│  │  └─ src/
+│  │     ├─ main.rs
+│  │     ├─ persist.rs
+│  │     ├─ emit.rs
+│  │     ├─ price_refresher.rs
+│  │     ├─ helius/
+│  │     │  ├─ handler.rs
+│  │     │  └─ map_actions.rs
+│  │     ├─ rpc/
+│  │     │  ├─ logs_sub.rs
+│  │     │  └─ accounts_sub.rs
+│  │     └─ normalize/
+│  │        ├─ anchor_events.rs
+│  │        └─ classify.rs
+│  │
+│  ├─ detectors/
+│  │  ├─ Cargo.toml
+│  │  └─ src/
+│  │     ├─ main.rs
+│  │     ├─ engine.rs
+│  │     ├─ trait_detector.rs
+│  │     ├─ store.rs
+│  │     ├─ params.rs
+│  │     ├─ detectors/
+│  │     │  ├─ s2e.rs
+│  │     │  ├─ bhd.rs
+│  │     │  ├─ bad_route.rs
+│  │     │  └─ idle_yield.rs
+│  │     ├─ position/
+│  │     │  ├─ engine.rs
+│  │     │  └─ snapshot.rs
+│  │     ├─ prices/
+│  │     │  ├─ jupiter.rs
+│  │     │  └─ pyth.rs
+│  │     └─ tests/
+│  │        ├─ golden_wallet_4y.json
+│  │        └─ detectors_test.rs
+│  │
+│  ├─ workers/
+│  │  ├─ Cargo.toml
+│  │  └─ src/
+│  │     ├─ main.rs
+│  │     ├─ scheduler.rs
+│  │     ├─ policy.rs
+│  │     └─ jobs/
+│  │        ├─ backfill_wallet.rs
+│  │        ├─ price_snapshots.rs
+│  │        ├─ nightly_compact.rs
+│  │        ├─ alerts_dispatch.rs
+│  │        ├─ campaign_publish_root.rs
+│  │        └─ top_mints_refresh.rs
+│  │
+│  ├─ renderer/
+│  │  ├─ Cargo.toml
+│  │  └─ src/
+│  │     └─ lib.rs
+│  │  └─ templates/
+│  │     └─ moment_card.svg
+│  │
+│  └─ anchor_sdk/
+│     ├─ Cargo.toml
+│     └─ src/
+│        ├─ campaigns.rs
+│        ├─ staking.rs
+│        └─ moment_registry.rs
+│
+├─ db/
+│  ├─ migrations/
+│  │  ├─ 0001_tx_raw.sql
+│  │  ├─ 0002_actions.sql
+│  │  ├─ 0003_participants.sql
+│  │  ├─ 0004_positions.sql
+│  │  ├─ 0005_moments_extremes.sql
+│  │  ├─ 0006_prices.sql
+│  │  ├─ 0007_views.sql
+│  │  ├─ 0008_plans_policy.sql
+│  │  ├─ 0009_job_queue.sql
+│  │  └─ 0010_token_facts.sql
+│  ├─ queries/
+│  │  ├─ upsert_tx_raw.sql
+│  │  ├─ insert_action.sql
+│  │  ├─ select_wallet_actions.sql
+│  │  ├─ insert_lot.sql
+│  │  ├─ insert_realized_trade.sql
+│  │  ├─ insert_episode.sql
+│  │  ├─ insert_moment.sql
+│  │  ├─ wallet_extremes.sql
+│  │  └─ price_bucket_query.sql
+│  └─ seed/
+│     └─ plans_seed.sql
+│
+├─ configs/
+│  ├─ default.yaml
+│  ├─ detectors.yaml
+│  ├─ plans.yaml
+│  └─ rate_limits.yaml
+│
+├─ schemas/
+│  ├─ http/
+│  │  ├─ moment_response.schema.json
+│  │  ├─ analyze_request.schema.json
+│  │  └─ wallet_summary.schema.json
+│  └─ bus/
+│     ├─ chain_event.proto
+│     └─ moment.proto
+│
+├─ infra/
+│  ├─ docker/
+│  │  ├─ api.Dockerfile
+│  │  ├─ indexer.Dockerfile
+│  │  ├─ detectors.Dockerfile
+│  │  ├─ workers.Dockerfile
+│  │  ├─ renderer.Dockerfile
+│  │  └─ docker-compose.dev.yml
+│  ├─ railway/
+│  │  ├─ api.json
+│  │  ├─ indexer.json
+│  │  ├─ detectors.json
+│  │  └─ workers.json
+│  └─ observability/
+│     ├─ prometheus.yml
+│     └─ dashboards/
+│        └─ grafana-example.json
+│
+└─ scripts/
+   ├─ dev_up.sh
+   ├─ migrate.sh
+   ├─ seed.sh
+   ├─ backfill_wallet.sh
+   ├─ gen_idl.sh
+   └─ lint_all.sh
+```
+
+---
+
+# One-shot PowerShell script (creates **all** empty files)
+
+Save this as `create_oof_backend_skeleton.ps1`, run it from the directory where you want the `backend` folder created.
+
+```powershell
+# create_oof_backend_skeleton.ps1
+# Creates the full Rust backend skeleton for OOF as empty files.
+
+$root = "backend"
+
+$files = @(
+  # root
+  "Cargo.toml",
+  "rust-toolchain.toml",
+  ".env.example",
+  "Makefile",
+  "README.md",
+
+  # crates/shared
+  "crates/shared/Cargo.toml",
+  "crates/shared/src/config.rs",
+  "crates/shared/src/db.rs",
+  "crates/shared/src/redis.rs",
+  "crates/shared/src/telemetry.rs",
+  "crates/shared/src/idl.rs",
+  "crates/shared/src/constants.rs",
+  "crates/shared/src/errors.rs",
+  "crates/shared/src/utils.rs",
+  "crates/shared/src/security/dynamic_jwks.rs",
+  "crates/shared/src/security/helius_hmac.rs",
+  "crates/shared/src/types/chain.rs",
+  "crates/shared/src/types/price.rs",
+  "crates/shared/src/types/moment.rs",
+  "crates/shared/src/types/policy.rs",
+
+  # crates/api
+  "crates/api/Cargo.toml",
+  "crates/api/src/main.rs",
+  "crates/api/src/state.rs",
+  "crates/api/src/ws_sse.rs",
+  "crates/api/src/middleware/auth.rs",
+  "crates/api/src/middleware/rate_limit.rs",
+  "crates/api/src/middleware/errors.rs",
+  "crates/api/src/services/portfolio.rs",
+  "crates/api/src/services/pricing.rs",
+  "crates/api/src/services/proofs.rs",
+  "crates/api/src/dto/analyze.rs",
+  "crates/api/src/dto/moment.rs",
+  "crates/api/src/dto/wallet.rs",
+  "crates/api/src/routes/health.rs",
+  "crates/api/src/routes/analyze.rs",
+  "crates/api/src/routes/moments.rs",
+  "crates/api/src/routes/cards.rs",
+  "crates/api/src/routes/wallets.rs",
+  "crates/api/src/routes/tokens.rs",
+  "crates/api/src/routes/campaigns.rs",
+  "crates/api/src/routes/leaderboard.rs",
+  "crates/api/src/routes/webhooks/helius.rs",
+
+  # crates/indexer
+  "crates/indexer/Cargo.toml",
+  "crates/indexer/src/main.rs",
+  "crates/indexer/src/persist.rs",
+  "crates/indexer/src/emit.rs",
+  "crates/indexer/src/price_refresher.rs",
+  "crates/indexer/src/helius/handler.rs",
+  "crates/indexer/src/helius/map_actions.rs",
+  "crates/indexer/src/rpc/logs_sub.rs",
+  "crates/indexer/src/rpc/accounts_sub.rs",
+  "crates/indexer/src/normalize/anchor_events.rs",
+  "crates/indexer/src/normalize/classify.rs",
+
+  # crates/detectors
+  "crates/detectors/Cargo.toml",
+  "crates/detectors/src/main.rs",
+  "crates/detectors/src/engine.rs",
+  "crates/detectors/src/trait_detector.rs",
+  "crates/detectors/src/store.rs",
+  "crates/detectors/src/params.rs",
+  "crates/detectors/src/detectors/s2e.rs",
+  "crates/detectors/src/detectors/bhd.rs",
+  "crates/detectors/src/detectors/bad_route.rs",
+  "crates/detectors/src/detectors/idle_yield.rs",
+  "crates/detectors/src/position/engine.rs",
+  "crates/detectors/src/position/snapshot.rs",
+  "crates/detectors/src/prices/jupiter.rs",
+  "crates/detectors/src/prices/pyth.rs",
+  "crates/detectors/src/tests/golden_wallet_4y.json",
+  "crates/detectors/src/tests/detectors_test.rs",
+
+  # crates/workers
+  "crates/workers/Cargo.toml",
+  "crates/workers/src/main.rs",
+  "crates/workers/src/scheduler.rs",
+  "crates/workers/src/policy.rs",
+  "crates/workers/src/jobs/backfill_wallet.rs",
+  "crates/workers/src/jobs/price_snapshots.rs",
+  "crates/workers/src/jobs/nightly_compact.rs",
+  "crates/workers/src/jobs/alerts_dispatch.rs",
+  "crates/workers/src/jobs/campaign_publish_root.rs",
+  "crates/workers/src/jobs/top_mints_refresh.rs",
+
+  # crates/renderer
+  "crates/renderer/Cargo.toml",
+  "crates/renderer/src/lib.rs",
+  "crates/renderer/templates/moment_card.svg",
+
+  # crates/anchor_sdk
+  "crates/anchor_sdk/Cargo.toml",
+  "crates/anchor_sdk/src/campaigns.rs",
+  "crates/anchor_sdk/src/staking.rs",
+  "crates/anchor_sdk/src/moment_registry.rs",
+
+  # db/migrations
+  "db/migrations/0001_tx_raw.sql",
+  "db/migrations/0002_actions.sql",
+  "db/migrations/0003_participants.sql",
+  "db/migrations/0004_positions.sql",
+  "db/migrations/0005_moments_extremes.sql",
+  "db/migrations/0006_prices.sql",
+  "db/migrations/0007_views.sql",
+  "db/migrations/0008_plans_policy.sql",
+  "db/migrations/0009_job_queue.sql",
+  "db/migrations/0010_token_facts.sql",
+
+  # db/queries
+  "db/queries/upsert_tx_raw.sql",
+  "db/queries/insert_action.sql",
+  "db/queries/select_wallet_actions.sql",
+  "db/queries/insert_lot.sql",
+  "db/queries/insert_realized_trade.sql",
+  "db/queries/insert_episode.sql",
+  "db/queries/insert_moment.sql",
+  "db/queries/wallet_extremes.sql",
+  "db/queries/price_bucket_query.sql",
+
+  # db/seed
+  "db/seed/plans_seed.sql",
+
+  # configs
+  "configs/default.yaml",
+  "configs/detectors.yaml",
+  "configs/plans.yaml",
+  "configs/rate_limits.yaml",
+
+  # schemas
+  "schemas/http/moment_response.schema.json",
+  "schemas/http/analyze_request.schema.json",
+  "schemas/http/wallet_summary.schema.json",
+  "schemas/bus/chain_event.proto",
+  "schemas/bus/moment.proto",
+
+  # infra/docker & compose
+  "infra/docker/api.Dockerfile",
+  "infra/docker/indexer.Dockerfile",
+  "infra/docker/detectors.Dockerfile",
+  "infra/docker/workers.Dockerfile",
+  "infra/docker/renderer.Dockerfile",
+  "infra/docker/docker-compose.dev.yml",
+
+  # infra/railway
+  "infra/railway/api.json",
+  "infra/railway/indexer.json",
+  "infra/railway/detectors.json",
+  "infra/railway/workers.json",
+
+  # infra/observability
+  "infra/observability/prometheus.yml",
+  "infra/observability/dashboards/grafana-example.json",
+
+  # scripts
+  "scripts/dev_up.sh",
+  "scripts/migrate.sh",
+  "scripts/seed.sh",
+  "scripts/backfill_wallet.sh",
+  "scripts/gen_idl.sh",
+  "scripts/lint_all.sh"
+)
+
+# --- Create everything ---
+foreach ($rel in $files) {
+  $path = Join-Path $root $rel
+  $dir  = Split-Path $path -Parent
+
+  if (-not (Test-Path $dir)) {
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+  }
+
+  if (-not (Test-Path $path)) {
+    New-Item -ItemType File -Path $path -Force | Out-Null
+    Write-Host "Created $path"
+  } else {
+    Write-Host "Exists  $path"
+  }
+}
+
+Write-Host "`nDone. Empty skeleton created under '$root'."
+```
+
+**How to run**
+
+1. Save the script as `create_oof_backend_skeleton.ps1`.
+2. Open PowerShell in the folder where you want the project.
+3. Run: `.\create_oof_backend_skeleton.ps1` (if needed: `Set-ExecutionPolicy -Scope Process Bypass`)
+
+This will create **all directories and empty files** exactly as listed above, ready for you (or an AI agent) to start filling in implementations.

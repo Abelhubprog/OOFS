@@ -1,0 +1,166 @@
+# Rate Limiting Configuration
+# Protects API from abuse and ensures fair usage
+
+rate_limits:
+  # Global rate limits (across all users)
+  global:
+    requests_per_second: 1000
+    requests_per_minute: 30000
+    concurrent_connections: 10000
+
+  # Per-IP rate limits
+  per_ip:
+    requests_per_minute: 60
+    requests_per_hour: 1000
+    burst_size: 20
+    # Heavy operations
+    analyze_requests_per_hour: 10
+    card_generations_per_hour: 20
+
+  # Per-user rate limits (authenticated users)
+  per_user:
+    requests_per_minute: 100
+    requests_per_hour: 2000
+    burst_size: 50
+    # Overridden by plan-specific limits
+
+  # Per-wallet rate limits (for analysis)
+  per_wallet:
+    analyses_per_day: 5          # Default, overridden by plans
+    analyses_per_hour: 2
+    concurrent_analyses: 1        # Prevent parallel analysis of same wallet
+
+  # Endpoint-specific rate limits
+  endpoints:
+    # Analysis endpoints (most expensive)
+    "/v1/analyze":
+      per_ip_per_hour: 5
+      per_user_per_hour: 20       # Overridden by plan limits
+      cooldown_seconds: 60        # Minimum time between requests
+
+    # Moment listing (expensive queries)
+    "/v1/moments":
+      per_ip_per_minute: 10
+      per_user_per_minute: 30
+      max_limit_param: 1000       # Maximum ?limit= parameter
+
+    # Wallet extremes (cached but still limited)
+    "/v1/wallets/*/extremes":
+      per_ip_per_minute: 20
+      per_user_per_minute: 60
+      cache_ttl_seconds: 600      # 10 minute cache
+
+    # Card generation (resource intensive)
+    "/v1/cards/moment/*.png":
+      per_ip_per_hour: 50
+      per_user_per_hour: 200
+      concurrent_renders: 5        # Max parallel renders
+
+    # Price endpoints (less expensive, cached)
+    "/v1/tokens/*/prices":
+      per_ip_per_minute: 100
+      per_user_per_minute: 300
+
+    # Health and metrics (very permissive)
+    "/v1/health":
+      per_ip_per_minute: 60
+
+    "/metrics":
+      per_ip_per_minute: 10        # Prometheus scraping
+
+  # WebSocket/SSE rate limits
+  streaming:
+    connections_per_ip: 5
+    connections_per_user: 10
+    messages_per_minute: 100
+    subscription_changes_per_minute: 10
+
+  # Security rate limits
+  security:
+    # Authentication attempts
+    login_attempts_per_ip_per_hour: 10
+    login_attempts_per_user_per_hour: 5
+
+    # Failed requests (potential attacks)
+    failed_requests_per_ip_per_minute: 20
+
+    # Suspicious patterns
+    rapid_user_agent_changes_per_hour: 5
+
+# Rate limiting behavior
+behavior:
+  # Response when rate limited
+  response:
+    status_code: 429
+    headers:
+      retry_after: true           # Include Retry-After header
+      rate_limit_info: true       # Include rate limit headers
+    body:
+      error: "Rate limit exceeded"
+      retry_after_seconds: 60
+
+  # Rate limit storage
+  storage:
+    backend: "redis"              # Use Redis for distributed rate limiting
+    fallback_backend: "memory"    # Fallback to in-memory if Redis unavailable
+    key_prefix: "rl:"
+
+  # Rate limit calculation
+  algorithm: "token_bucket"       # Token bucket algorithm
+  window_type: "sliding"          # Sliding window for smooth rate limiting
+
+  # Burst handling
+  burst_behavior: "reject"        # reject|queue|delay
+  max_queue_size: 100
+  max_delay_seconds: 10
+
+  # Exemptions
+  whitelist:
+    ips: []                      # Whitelisted IP addresses
+    user_agents: []              # Whitelisted user agents
+    api_keys: []                 # Whitelisted API keys
+
+  # Monitoring and alerting
+  monitoring:
+    log_violations: true
+    alert_threshold_pct: 80      # Alert when approaching limits
+    metrics_export: true
+
+  # Adaptive rate limiting
+  adaptive:
+    enabled: false               # Experimental: adjust limits based on load
+    target_error_rate: 0.01      # Target 1% error rate
+    adjustment_interval_seconds: 300
+    max_adjustment_factor: 2.0
+
+# DDoS protection
+ddos_protection:
+  enabled: true
+
+  # IP-based protection
+  suspicious_patterns:
+    # Requests from single IP exceeding normal patterns
+    requests_per_second_threshold: 50
+    unique_endpoints_per_minute_threshold: 100
+
+  # Geographic restrictions (if needed)
+  geo_blocking:
+    enabled: false
+    blocked_countries: []        # ISO country codes
+
+  # User agent filtering
+  user_agent_filtering:
+    enabled: true
+    blocked_patterns:
+      - "bot"
+      - "crawler"
+      - "scanner"
+    required_headers:
+      - "User-Agent"
+      - "Accept"
+
+  # Response to DDoS
+  mitigation:
+    auto_block_duration_minutes: 60
+    escalating_blocks: true      # Increase block time for repeat offenders
+    notify_admins: true

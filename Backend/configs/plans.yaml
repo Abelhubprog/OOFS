@@ -1,0 +1,191 @@
+# OOF Plans Configuration
+# Pricing tiers, limits, and feature access
+
+plans:
+  # Free tier - limited access for trial users
+  FREE:
+    name: "Free Tier"
+    price_usd: "0.00"
+    billing_period: "monthly"
+    daily_wallets: 2
+    backfill_days: 180              # 6 months of history
+    cadence: "manual"               # Manual analysis only
+    alerts: 0
+    api_rows: 0                     # No API access
+    max_signatures_per_run: 1000    # Limit RPC usage
+    max_enhanced_tx_per_run: 100
+    max_cpu_seconds_per_run: 30
+    max_candle_reads_per_run: 500
+    perks:
+      priority_queue: false
+      custom_cards: false
+      api_access: false
+      historical_data: false
+      real_time_alerts: false
+      nft_minting: false
+      export_data: false
+      support_level: "community"
+    rate_limits:
+      requests_per_minute: 10
+      burst_size: 5
+
+  # Lite tier - basic paid features
+  LITE:
+    name: "Lite Plan"
+    price_usd: "2.00"
+    billing_period: "monthly"
+    daily_wallets: 5
+    backfill_days: 365              # 1 year of history
+    cadence: "weekly"               # Weekly auto-refresh
+    alerts: 0
+    api_rows: 10000                 # Basic API access
+    max_signatures_per_run: 5000
+    max_enhanced_tx_per_run: 500
+    max_cpu_seconds_per_run: 120
+    max_candle_reads_per_run: 2000
+    perks:
+      priority_queue: false
+      custom_cards: true
+      api_access: true
+      historical_data: true
+      real_time_alerts: false
+      nft_minting: false
+      export_data: true
+      support_level: "email"
+    rate_limits:
+      requests_per_minute: 30
+      burst_size: 15
+
+  # Standard tier - full features for regular users
+  STANDARD:
+    name: "Standard Plan"
+    price_usd: "5.00"
+    billing_period: "monthly"
+    daily_wallets: 15
+    backfill_days: 730              # 2 years of history
+    cadence: "daily"                # Daily auto-refresh
+    alerts: 5
+    api_rows: 50000
+    max_signatures_per_run: 15000
+    max_enhanced_tx_per_run: 1500
+    max_cpu_seconds_per_run: 300
+    max_candle_reads_per_run: 5000
+    perks:
+      priority_queue: true
+      custom_cards: true
+      api_access: true
+      historical_data: true
+      real_time_alerts: true
+      nft_minting: true
+      export_data: true
+      support_level: "priority"
+    rate_limits:
+      requests_per_minute: 60
+      burst_size: 30
+
+  # Pro tier - power users and professionals
+  PRO:
+    name: "Pro Plan"
+    price_usd: "10.00"
+    billing_period: "monthly"
+    daily_wallets: 25
+    backfill_days: 730              # 2 years of history
+    cadence: "daily"                # Daily auto-refresh
+    alerts: 10
+    api_rows: 100000
+    max_signatures_per_run: 50000
+    max_enhanced_tx_per_run: 5000
+    max_cpu_seconds_per_run: 600
+    max_candle_reads_per_run: 15000
+    perks:
+      priority_queue: true
+      custom_cards: true
+      api_access: true
+      historical_data: true
+      real_time_alerts: true
+      nft_minting: true
+      export_data: true
+      support_level: "priority"
+      webhook_integrations: true
+      custom_thresholds: true
+      batch_analysis: true
+    rate_limits:
+      requests_per_minute: 120
+      burst_size: 60
+
+  # Enterprise tier - high-volume users
+  ENTERPRISE:
+    name: "Enterprise Plan"
+    price_usd: "50.00"
+    billing_period: "monthly"
+    daily_wallets: 100
+    backfill_days: 730
+    cadence: "daily"
+    alerts: 50
+    api_rows: 1000000
+    max_signatures_per_run: 100000
+    max_enhanced_tx_per_run: 10000
+    max_cpu_seconds_per_run: 1800   # 30 minutes
+    max_candle_reads_per_run: 50000
+    perks:
+      priority_queue: true
+      custom_cards: true
+      api_access: true
+      historical_data: true
+      real_time_alerts: true
+      nft_minting: true
+      export_data: true
+      support_level: "dedicated"
+      webhook_integrations: true
+      custom_thresholds: true
+      batch_analysis: true
+      white_label: true
+      dedicated_resources: true
+    rate_limits:
+      requests_per_minute: 300
+      burst_size: 150
+
+# Staking boost configuration
+staking_boosts:
+  tiers:
+    - min_oof_staked: "1000"        # 1K OOF tokens
+      daily_wallets_bonus_pct: "0.25" # +25% daily wallets
+      card_mint_discount_pct: "0.25"  # 25% off card minting
+      priority_queue: true
+
+    - min_oof_staked: "5000"        # 5K OOF tokens
+      daily_wallets_bonus_pct: "0.50" # +50% daily wallets
+      card_mint_discount_pct: "0.50"  # 50% off card minting
+      priority_queue: true
+      fast_lane: true
+
+    - min_oof_staked: "25000"       # 25K OOF tokens
+      daily_wallets_bonus_pct: "1.00" # +100% daily wallets
+      card_mint_discount_pct: "0.75"  # 75% off card minting
+      priority_queue: true
+      fast_lane: true
+      beta_features: true
+
+  # Boost duration and refresh
+  boost_duration_days: 30           # Boosts last 30 days
+  refresh_grace_period_days: 7      # Grace period to renew
+  min_stake_duration_days: 7        # Must stake for minimum period
+
+# Plan enforcement settings
+enforcement:
+  quota_reset_time: "00:00"         # UTC time for daily reset
+  grace_period_hours: 24            # Grace period before hard cutoff
+  soft_limit_warning_pct: "0.80"    # Warn at 80% of limit
+  overage_charges:
+    enabled: false                  # No overage charges initially
+    per_wallet_usd: "0.50"         # Future: charge for extra wallets
+    per_api_call_usd: "0.001"      # Future: charge for extra API calls
+
+  # Upgrade prompts
+  show_upgrade_prompts: true
+  upgrade_prompt_threshold_pct: "0.90" # Show upgrade at 90% usage
+
+  # Plan transitions
+  allow_downgrades: true
+  downgrade_grace_period_days: 30
+  preserve_data_on_downgrade: true

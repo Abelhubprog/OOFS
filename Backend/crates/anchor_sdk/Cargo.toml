@@ -1,0 +1,23 @@
+[package]
+name = "anchor_sdk"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anchor-client = "0.30"
+anchor-lang = "0.30"
+solana-sdk = "~1.18"
+solana-client = "~1.18"
+solana-account-decoder = "~1.18"
+anyhow = "1.0"
+tracing = "0.1"
+rust_decimal = "1.29"
+borsh = "1.0"
+bs58 = "0.5"
+sha2 = "0.10"
+thiserror = "1.0"
+tokio = { version = "1.34", features = ["full"] }
+time = { version = "0.3", features = ["serde", "macros"] }
+shared = { path = "../shared" }

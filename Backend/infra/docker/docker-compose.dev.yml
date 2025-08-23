@@ -1,0 +1,47 @@
+version: "3.9"
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: oof
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/docker/api.Dockerfile
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/oof
+      API_BIND: 0.0.0.0:8080
+    depends_on:
+      - postgres
+    ports:
+      - "8080:8080"
+
+  indexer:
+    build:
+      context: ../..
+      dockerfile: infra/docker/indexer.Dockerfile
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/oof
+      INDEXER_BIND: 0.0.0.0:8081
+    depends_on:
+      - postgres
+    ports:
+      - "8081:8081"
+
+  workers:
+    build:
+      context: ../..
+      dockerfile: infra/docker/workers.Dockerfile
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/oof
+    depends_on:
+      - postgres
+
+volumes:
+  pgdata: {}

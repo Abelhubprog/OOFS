@@ -1,0 +1,353 @@
+version: '3.8'
+
+services:
+  # Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: oof-postgres
+    environment:
+      POSTGRES_DB: oof_backend
+      POSTGRES_USER: oof_user
+      POSTGRES_PASSWORD: oof_password
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - oof-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oof_user -d oof_backend"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis for caching and pub/sub
+  redis:
+    image: redis:7-alpine
+    container_name: oof-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - oof-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+
+  # MinIO for object storage (S3-compatible)
+  minio:
+    image: minio/minio:latest
+    container_name: oof-minio
+    environment:
+      MINIO_ROOT_USER: oof_minio_user
+      MINIO_ROOT_PASSWORD: oof_minio_password
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - oof-network
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+  # Database migrations
+  migrations:
+    build:
+      context: .
+      dockerfile: Dockerfile.migrations
+    container_name: oof-migrations
+    environment:
+      DATABASE_URL: postgresql://oof_user:oof_password@postgres:5432/oof_backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - oof-network
+    volumes:
+      - ./db:/app/db:ro
+
+  # API service
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+      args:
+        GIT_HASH: ${GIT_HASH:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+        RUSTC_VERSION: ${RUSTC_VERSION:-1.79}
+    container_name: oof-api
+    environment:
+      # Database
+      DATABASE_URL: postgresql://oof_user:oof_password@postgres:5432/oof_backend
+
+      # Redis (optional)
+      REDIS_URL: redis://redis:6379
+
+      # Object storage
+      ASSET_BUCKET: s3://oof-assets
+      AWS_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: oof_minio_user
+      AWS_SECRET_ACCESS_KEY: oof_minio_password
+      AWS_REGION: us-east-1
+
+      # API configuration
+      API_BIND: 0.0.0.0:8080
+      CDN_BASE: http://localhost:9000/oof-assets
+      CORS_ALLOW_ORIGIN: http://localhost:3000
+
+      # Authentication
+      JWKS_URL: https://auth.dynamic.xyz/.well-known/jwks
+      JWT_ISSUER: https://auth.dynamic.xyz
+      JWT_AUDIENCE: oof-backend
+
+      # Rate limiting
+      RATE_LIMIT_REQUESTS_PER_MINUTE: 100
+
+      # Solana RPC
+      RPC_PRIMARY: https://api.mainnet-beta.solana.com
+      RPC_BACKUP: https://solana-api.projectserum.com
+
+      # Jupiter API
+      JUPITER_BASE_URL: https://price.jup.ag/v3
+
+      # Logging
+      RUST_LOG: info,oof_backend=debug
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    networks:
+      - oof-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+
+  # Indexer service
+  indexer:
+    build:
+      context: .
+      dockerfile: Dockerfile.indexer
+      args:
+        GIT_HASH: ${GIT_HASH:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+        RUSTC_VERSION: ${RUSTC_VERSION:-1.79}
+    container_name: oof-indexer
+    environment:
+      # Database
+      DATABASE_URL: postgresql://oof_user:oof_password@postgres:5432/oof_backend
+
+      # Redis
+      REDIS_URL: redis://redis:6379
+
+      # Object storage
+      ASSET_BUCKET: s3://oof-assets
+      AWS_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: oof_minio_user
+      AWS_SECRET_ACCESS_KEY: oof_minio_password
+      AWS_REGION: us-east-1
+
+      # Indexer configuration
+      INDEXER_BIND: 0.0.0.0:8081
+
+      # Helius webhook
+      HELIUS_WEBHOOK_SECRET: your_helius_webhook_secret_here
+
+      # Solana RPC
+      RPC_PRIMARY: https://api.mainnet-beta.solana.com
+      RPC_BACKUP: https://solana-api.projectserum.com
+
+      # Jupiter API
+      JUPITER_BASE_URL: https://price.jup.ag/v3
+
+      # Logging
+      RUST_LOG: info,oof_backend=debug
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    networks:
+      - oof-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.5'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+
+  # Workers service
+  workers:
+    build:
+      context: .
+      dockerfile: Dockerfile.workers
+      args:
+        GIT_HASH: ${GIT_HASH:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+        RUSTC_VERSION: ${RUSTC_VERSION:-1.79}
+    container_name: oof-workers
+    environment:
+      # Database
+      DATABASE_URL: postgresql://oof_user:oof_password@postgres:5432/oof_backend
+
+      # Redis
+      REDIS_URL: redis://redis:6379
+
+      # Object storage
+      ASSET_BUCKET: s3://oof-assets
+      AWS_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: oof_minio_user
+      AWS_SECRET_ACCESS_KEY: oof_minio_password
+      AWS_REGION: us-east-1
+
+      # Solana RPC
+      RPC_PRIMARY: https://api.mainnet-beta.solana.com
+      RPC_BACKUP: https://solana-api.projectserum.com
+
+      # Jupiter API
+      JUPITER_BASE_URL: https://price.jup.ag/v3
+
+      # Worker configuration
+      WORKER_CONCURRENCY: 4
+      BACKFILL_BATCH_SIZE: 1000
+
+      # Logging
+      RUST_LOG: info,oof_backend=debug
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      migrations:
+        condition: service_completed_successfully
+    networks:
+      - oof-network
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: oof-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - oof-network
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    restart: unless-stopped
+
+  # Grafana for observability dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: oof-grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: false
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - oof-network
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  # Nginx reverse proxy (optional for production)
+  nginx:
+    image: nginx:alpine
+    container_name: oof-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./deploy/nginx/conf.d:/etc/nginx/conf.d:ro
+    depends_on:
+      - api
+      - indexer
+    networks:
+      - oof-network
+    restart: unless-stopped
+    profiles:
+      - production
+
+networks:
+  oof-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  prometheus_data:
+  grafana_data:

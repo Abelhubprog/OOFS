@@ -1,0 +1,100 @@
+# OOF Moment Detector Configuration
+# All thresholds and parameters for moment detection
+
+detectors:
+  # Sold Too Early (S2E) detector
+  s2e:
+    enabled: true
+    version: 1
+    min_missed_pct: "0.25"        # 25% minimum missed gains
+    min_missed_usd: "25"          # $25 minimum missed USD
+    window_days: 7                # Look ahead window for peak detection
+    severity_scaling:
+      base_pct: "0.75"            # 75% missed = max severity
+      max_severity: "1.0"
+    confidence_thresholds:
+      high: "0.9"
+      medium: "0.7"
+      low: "0.5"
+
+  # Bag Holder Drawdown (BHD) detector
+  bhd:
+    enabled: true
+    version: 1
+    min_drawdown_pct: "-0.30"     # 30% minimum drawdown
+    window_days: 7                # Look ahead window for trough detection
+    severity_scaling:
+      base_drawdown: "0.30"       # 30% drawdown = base severity
+      max_drawdown: "0.80"        # 80% drawdown = max severity
+    exclude_micro_positions: true  # Skip positions < $10 value
+    min_position_usd: "10"
+
+  # Bad Route detector
+  badroute:
+    enabled: true
+    version: 1
+    min_worse_pct: "0.01"         # 1% minimum worse execution
+    window_minutes: 1             # Time window for best price comparison
+    severity_scaling:
+      max_worse_pct: "0.10"       # 10% worse = max severity
+    exclude_micro_swaps: true
+    min_swap_usd: "5"
+    price_sources:
+      - "jupiter"
+      - "pyth"
+      - "exec_obs"
+
+  # Idle Yield detector
+  idle:
+    enabled: true
+    version: 1
+    min_missed_usd: "25"          # $25 minimum missed yield
+    min_balance_threshold: "100"   # Minimum $OOF balance to consider
+    lookback_days: 30             # Period to analyze for idleness
+    annual_yield_rate: "0.08"     # 8% APR for staking
+    compound_frequency: "daily"    # How often yield compounds
+    exclude_active_traders: true   # Skip wallets with frequent activity
+    activity_threshold_days: 7     # Consider active if traded in last N days
+
+  # Rug detector (advanced, optional)
+  rug:
+    enabled: false               # Disabled by default (complex implementation)
+    version: 1
+    min_collapse_pct: "-0.80"     # 80% price collapse from ATH
+    persistence_days: 7           # Collapse must persist for N days
+    liquidity_drop_threshold: "-0.90" # 90% liquidity removal
+    holder_concentration_max: "0.10"  # Max 10% of supply in single wallet
+    min_market_cap_usd: "1000000" # Only analyze tokens > $1M market cap
+    ath_lookback_days: 30         # ATH reference period
+
+# Global detector settings
+global:
+  # Processing settings
+  batch_size: 1000               # Events processed per batch
+  max_concurrent_detectors: 10   # Parallel detector executions
+
+  # Data retention
+  moment_retention_days: 365     # Keep moments for 1 year
+  snapshot_retention_days: 90    # Keep position snapshots for 90 days
+
+  # Performance tuning
+  price_cache_ttl_minutes: 5     # Cache external price data
+  detector_timeout_seconds: 30   # Max time per detector execution
+
+  # Quality filters
+  min_confidence_score: "0.5"    # Minimum confidence to emit moment
+  dedupe_window_minutes: 5       # Prevent duplicate moments within window
+
+  # Notification settings
+  publish_to_sse: true           # Publish moments to SSE streams
+  publish_to_redis: true         # Publish to Redis pub/sub
+  generate_cards: true           # Auto-generate moment cards
+
+  # Rate limiting (per wallet)
+  max_moments_per_day: 50        # Prevent moment spam
+  max_moments_per_hour: 10
+
+  # Development/debugging
+  enable_debug_logging: false
+  save_debug_snapshots: false
+  debug_wallet_whitelist: []     # Only process these wallets in debug mode

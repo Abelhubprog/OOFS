@@ -1,0 +1,22 @@
+[package]
+name = "workers"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.34", features = ["rt-multi-thread", "macros", "time", "signal"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+rust_decimal = "1.29"
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "macros"] }
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+shared = { path = "../shared", features = ["with-r2"] }
+ulid = "1.2"
+time = { version = "0.3", features = ["serde", "macros"] }
+renderer = { path = "../renderer" }
+detectors = { path = "../detectors" }
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+anyhow = "1.0"
+zstd = "0.13"
+futures = "0.3"

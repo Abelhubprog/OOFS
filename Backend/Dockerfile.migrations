@@ -1,0 +1,43 @@
+# Dockerfile for database migrations
+FROM rust:1.79-slim-bookworm
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    libpq-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install sqlx-cli
+RUN cargo install sqlx-cli --features postgres
+
+# Create app directory
+WORKDIR /app
+
+# Copy database files
+COPY db/ ./db/
+
+# Create migration script
+RUN echo '#!/bin/bash\n\
+set -e\n\
+echo "Waiting for database to be ready..."\n\
+until pg_isready -h postgres -U oof_user -d oof_backend; do\n\
+  echo "Database not ready, waiting..."\n\
+  sleep 2\n\
+done\n\
+echo "Database is ready, running migrations..."\n\
+sqlx database create --database-url "$DATABASE_URL" || echo "Database already exists"\n\
+sqlx migrate run --database-url "$DATABASE_URL" --source ./db/migrations\n\
+echo "Migrations completed successfully"\n\
+# Run any additional setup scripts\n\
+if [ -f ./db/seed.sql ]; then\n\
+  echo "Running seed data..."\n\
+  psql "$DATABASE_URL" -f ./db/seed.sql\n\
+fi\n\
+echo "Database initialization complete"' > /app/migrate.sh
+
+RUN chmod +x /app/migrate.sh
+
+# Default command
+CMD ["/app/migrate.sh"]

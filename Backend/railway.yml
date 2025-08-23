@@ -1,0 +1,122 @@
+# Railway.com Deployment Configuration
+# This configuration sets up the OOF backend services on Railway
+
+version: "3"
+
+services:
+  # Main API Service
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    environment:
+      # Database (Railway PostgreSQL add-on)
+      - DATABASE_URL=$DATABASE_URL
+      - REDIS_URL=$REDIS_URL
+
+      # Dynamic.xyz Authentication
+      - DYNAMIC_ENVIRONMENT_ID=$DYNAMIC_ENVIRONMENT_ID
+      - DYNAMIC_API_KEY=$DYNAMIC_API_KEY
+      - DYNAMIC_JWKS_URL=$DYNAMIC_JWKS_URL
+      - DYNAMIC_WEBHOOK_SECRET=$DYNAMIC_WEBHOOK_SECRET
+
+      # Cloudflare R2 Storage
+      - R2_ENDPOINT=$R2_ENDPOINT
+      - R2_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID
+      - R2_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY
+      - R2_BUCKET_NAME=$R2_BUCKET_NAME
+      - R2_PUBLIC_URL=$R2_PUBLIC_URL
+
+      # Solana Configuration
+      - RPC_PRIMARY=$RPC_PRIMARY
+      - RPC_SECONDARY=$RPC_SECONDARY
+      - HELIUS_WEBHOOK_SECRET=$HELIUS_WEBHOOK_SECRET
+
+      # External APIs
+      - JUPITER_BASE_URL=$JUPITER_BASE_URL
+      - PYTH_HERMES_SSE=$PYTH_HERMES_SSE
+
+      # Server Configuration
+      - API_BIND=0.0.0.0:$PORT
+      - INDEXER_BIND=0.0.0.0:8081
+      - ALLOW_ORIGIN=$ALLOW_ORIGIN
+
+      # Security
+      - APP_SECRET=$APP_SECRET
+      - ENVIRONMENT=production
+    ports:
+      - "$PORT:$PORT"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:$PORT/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Background Worker Service
+  worker:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+    environment:
+      # Database (Railway PostgreSQL add-on)
+      - DATABASE_URL=$DATABASE_URL
+      - REDIS_URL=$REDIS_URL
+
+      # Dynamic.xyz Authentication
+      - DYNAMIC_ENVIRONMENT_ID=$DYNAMIC_ENVIRONMENT_ID
+      - DYNAMIC_API_KEY=$DYNAMIC_API_KEY
+
+      # Cloudflare R2 Storage
+      - R2_ENDPOINT=$R2_ENDPOINT
+      - R2_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID
+      - R2_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY
+      - R2_BUCKET_NAME=$R2_BUCKET_NAME
+      - R2_PUBLIC_URL=$R2_PUBLIC_URL
+
+      # Solana Configuration
+      - RPC_PRIMARY=$RPC_PRIMARY
+      - RPC_SECONDARY=$RPC_SECONDARY
+
+      # External APIs
+      - JUPITER_BASE_URL=$JUPITER_BASE_URL
+
+      # Security
+      - APP_SECRET=$APP_SECRET
+      - ENVIRONMENT=production
+    restart: unless-stopped
+    depends_on:
+      - api
+
+  # Transaction Indexer Service
+  indexer:
+    build:
+      context: .
+      dockerfile: docker/indexer.Dockerfile
+    environment:
+      # Database (Railway PostgreSQL add-on)
+      - DATABASE_URL=$DATABASE_URL
+      - REDIS_URL=$REDIS_URL
+
+      # Solana Configuration
+      - RPC_PRIMARY=$RPC_PRIMARY
+      - RPC_SECONDARY=$RPC_SECONDARY
+      - HELIUS_WEBHOOK_SECRET=$HELIUS_WEBHOOK_SECRET
+
+      # Cloudflare R2 Storage (for transaction storage)
+      - R2_ENDPOINT=$R2_ENDPOINT
+      - R2_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID
+      - R2_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY
+      - R2_BUCKET_NAME=$R2_BUCKET_NAME
+
+      # Server Configuration
+      - INDEXER_BIND=0.0.0.0:8081
+
+      # Security
+      - APP_SECRET=$APP_SECRET
+      - ENVIRONMENT=production
+    ports:
+      - "8081:8081"
+    restart: unless-stopped
+    depends_on:
+      - api
