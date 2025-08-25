@@ -10,10 +10,8 @@ services:
     build:
       buildCommand: |
         # Install dependencies
-        npm ci
+        npm install
         # Build frontend
-        cd client && npm ci && npm run build && cd ..
-        # Build backend if needed
         npm run build
       startCommand: npm start
     deploy:
@@ -136,8 +134,6 @@ hooks:
 
   postbuild:
     - echo "✅ Build completed successfully!"
-    - echo "Running database migrations..."
-    - npm run db:migrate
 
   postdeploy:
     - echo "🎉 OOF Platform deployed successfully!"
