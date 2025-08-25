@@ -17,11 +17,11 @@ export interface TokenInfo {
 }
 
 class SolanaTokenService {
-  private baseUrl = '/api/solana'; // Use backend API instead of external API
+  private baseUrl = '/v1'; // Use new Rust API instead of old Node API
 
   async getTrendingTokens(): Promise<TokenInfo[]> {
     try {
-      const response = await fetch(`${this.baseUrl}/tokens/trending`, {
+      const response = await fetch(`${this.baseUrl}/trending/tokens`, {
         credentials: 'include'
       });
 
@@ -30,7 +30,7 @@ class SolanaTokenService {
       }
 
       const data = await response.json();
-      return data.tokens || [];
+      return data.data || [];
     } catch (error) {
       console.error('Error fetching trending tokens:', error);
       return [];
@@ -39,6 +39,7 @@ class SolanaTokenService {
 
   async searchTokens(query: string): Promise<TokenInfo[]> {
     try {
+      // Use the tokens search endpoint from Rust backend
       const response = await fetch(`${this.baseUrl}/tokens/search?q=${encodeURIComponent(query)}`, {
         credentials: 'include'
       });
@@ -57,6 +58,7 @@ class SolanaTokenService {
 
   async getTokenByMint(mint: string): Promise<TokenInfo | null> {
     try {
+      // Get token info from token_facts table
       const response = await fetch(`${this.baseUrl}/tokens/${mint}`, {
         credentials: 'include'
       });
@@ -78,7 +80,7 @@ class SolanaTokenService {
 
   async getTokenPrice(mint: string): Promise<number> {
     try {
-      const response = await fetch(`${this.baseUrl}/tokens/${mint}/price`, {
+      const response = await fetch(`${this.baseUrl}/tokens/${mint}/prices`, {
         credentials: 'include'
       });
 
@@ -87,7 +89,12 @@ class SolanaTokenService {
       }
 
       const data = await response.json();
-      return data.price || 0;
+      // Get the latest price from the data array
+      if (data.data && data.data.length > 0) {
+        const latestPrice = data.data[data.data.length - 1];
+        return parseFloat(latestPrice.price) || 0;
+      }
+      return 0;
     } catch (error) {
       console.error('Error fetching token price:', error);
       return 0;
@@ -101,6 +108,7 @@ class SolanaTokenService {
     marketCap: number;
   }> {
     try {
+      // Get metrics from the Rust backend
       const response = await fetch(`${this.baseUrl}/tokens/${mint}/metrics`, {
         credentials: 'include'
       });
@@ -133,6 +141,7 @@ class SolanaTokenService {
     percentage: number;
   }[]> {
     try {
+      // Get token holders from the Rust backend
       const response = await fetch(`${this.baseUrl}/tokens/${mint}/holders?limit=${limit}`, {
         credentials: 'include'
       });

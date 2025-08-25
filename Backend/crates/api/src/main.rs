@@ -80,7 +80,10 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/health", get(routes::health))
+        .route("/ready", get(routes::ready))
+        .route("/v1/openapi.json", get(routes::openapi_spec))
         .route("/metrics", get(routes::metrics))
+        .route("/auth/verify", post(routes::auth_verify)) // New auth verification endpoint
         .route(
             "/v1/analyze",
             post(routes::analyze).route_layer(axum::middleware::from_fn_with_state(
@@ -95,6 +98,8 @@ async fn main() -> anyhow::Result<()> {
                 .route_layer(axum::middleware::from_fn(rate_limit_mw::per_ip_limit)),
         )
         .route("/v1/moments/:id", get(routes::moment_detail))
+        .route("/v1/moments/:id/mint", post(routes::mint_moment_nft)) // New NFT minting endpoint
+        .route("/v1/moments/:id/nft", get(routes::get_moment_nft)) // New NFT details endpoint
         .route("/v1/wallets/:wallet/summary", get(routes::wallet_summary))
         .route(
             "/v1/wallets/:wallet/extremes",
@@ -104,6 +109,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/cards/moment/:id.png", get(routes::card_png))
         .route("/v1/tokens/:mint/prices", get(routes::token_prices))
         .route("/v1/leaderboard", get(routes::leaderboard))
+        .route("/v1/trending/tokens", get(routes::tokens::trending_tokens))
+        .route("/v1/campaigns", post(routes::campaigns::create_campaign).get(routes::campaigns::get_campaigns))
+        .route("/v1/campaigns/:id/actions", post(routes::campaigns::create_campaign_action).get(routes::campaigns::get_campaign_actions))
+        .route("/v1/campaigns/:id/participate", post(routes::campaigns::participate_in_campaign))
         .merge(metrics_router())
         .layer(cors)
         .layer(axum::middleware::from_fn_with_state(

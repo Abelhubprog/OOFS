@@ -1,0 +1,127 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "OOF Backend API",
+    "version": "1.0.0",
+    "description": "Core endpoints for wallet analysis, OOF moments, pricing, and health."
+  },
+  "servers": [{ "url": "https://api.oof.example" }],
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Health status",
+        "responses": { "200": { "description": "Health report" } }
+      }
+    },
+    "/ready": {
+      "get": {
+        "summary": "Readiness probe",
+        "responses": { "200": { "description": "Ready" }, "503": { "description": "Not ready" } }
+      }
+    },
+    "/v1/analyze": {
+      "post": {
+        "summary": "Start wallet analysis",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "wallets": { "type": "array", "items": { "type": "string" } },
+                  "planCode": { "type": "string" }
+                },
+                "required": ["wallets"]
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "Job queued" }, "401": { "description": "Unauthorized" } }
+      }
+    },
+    "/v1/analyze/{job}/stream": {
+      "get": {
+        "summary": "SSE progress stream",
+        "parameters": [{ "name": "job", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "SSE stream" } }
+      }
+    },
+    "/v1/moments": {
+      "get": {
+        "summary": "List OOF moments",
+        "parameters": [
+          { "name": "wallet", "in": "query", "schema": { "type": "string" } },
+          { "name": "kinds", "in": "query", "schema": { "type": "string" }, "description": "Comma-separated" },
+          { "name": "since", "in": "query", "schema": { "type": "string", "format": "date-time" } },
+          { "name": "min_usd", "in": "query", "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "maximum": 200 } },
+          { "name": "cursor", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "Moments list" } }
+      }
+    },
+    "/v1/moments/{id}": {
+      "get": {
+        "summary": "Get moment details",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Moment detail" }, "404": { "description": "Not found" } }
+      }
+    },
+    "/v1/wallets/{wallet}/summary": {
+      "get": {
+        "summary": "Wallet summary and holdings",
+        "parameters": [{ "name": "wallet", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Summary" } }
+      }
+    },
+    "/v1/wallets/{wallet}/extremes": {
+      "get": {
+        "summary": "Wallet extreme moments",
+        "parameters": [{ "name": "wallet", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "Extremes" } }
+      }
+    },
+    "/v1/cards/moment/{id}.png": {
+      "get": {
+        "summary": "Moment card image",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "PNG" } }
+      }
+    },
+    "/v1/tokens/{mint}/prices": {
+      "get": {
+        "summary": "Token prices",
+        "parameters": [
+          { "name": "mint", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "tf", "in": "query", "schema": { "type": "string" } },
+          { "name": "since", "in": "query", "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "Series" } }
+      }
+    },
+    "/v1/leaderboard": {
+      "get": {
+        "summary": "Performance leaderboard",
+        "parameters": [
+          { "name": "period", "in": "query", "schema": { "type": "string" } },
+          { "name": "metric", "in": "query", "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": { "200": { "description": "Leaderboard" } }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    }
+  }
+}
+

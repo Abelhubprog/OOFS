@@ -1,7 +1,20 @@
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { TrendingUp, TrendingDown, Clock, Target, Zap } from "lucide-react";
-import type { Prediction, Token } from "@shared/schema";
+// Minimal types for UI only
+type Token = { id?: number; symbol?: string };
+type Prediction = {
+  id?: number;
+  userId: string;
+  tokenId: number;
+  direction: 'up' | 'down';
+  currentPrice: string | null;
+  targetPrice: string | null;
+  timeframe: string;
+  potentialReward?: number | null;
+  expiresAt?: string | null;
+  status?: 'pending' | 'success' | 'failed' | 'expired';
+};
 
 interface PredictionCardProps {
   prediction: Prediction;

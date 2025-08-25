@@ -51,6 +51,10 @@ ANTHROPIC_API_KEY="sk-ant-your-anthropic-key"
 # Blockchain (REQUIRED)
 SOLANA_RPC_URL="https://api.mainnet-beta.solana.com"
 
+# Backend Rust API (Recommended)
+# Used by the Node server to proxy analytics/moments requests
+BACKEND_BASE_URL="http://localhost:8080"
+
 # Optional but recommended
 STRIPE_SECRET_KEY="sk_your_stripe_key"
 ZORA_API_KEY="your-zora-api-key"

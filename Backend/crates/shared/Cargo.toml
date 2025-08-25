@@ -37,10 +37,16 @@ subtle = "2.5"
 rand = "0.8"
 bs58 = "0.5"
 
+# Solana dependencies (optional)
+solana-program = { version = "1.16", optional = true }
+solana-client = { version = "1.16", optional = true }
+solana-sdk = { version = "1.16", optional = true }
+
 [features]
 default = []
 with-redis = ["redis"]
 with-r2 = ["aws-config", "aws-sdk-s3", "aws-credential-types", "aws-types"]
+with-solana = ["solana-program", "solana-client", "solana-sdk"]
 
 [dependencies.aws-credential-types]
 version = "1.2"

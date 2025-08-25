@@ -3,7 +3,17 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Trophy, Crown, Award, User } from "lucide-react";
 import { useOOFAuth } from "@/providers/AuthProvider";
-import type { User as UserType } from "@shared/schema";
+// Minimal user type for UI only
+type UserType = {
+  id: string;
+  firstName?: string | null;
+  email?: string | null;
+  predictionAccuracy?: number | null;
+  totalPredictions?: number | null;
+  oofScore?: number | null;
+  oofTokens?: number | null;
+  ranking?: number | null;
+};
 
 export default function Leaderboard() {
   const { user: currentUser } = useOOFAuth();

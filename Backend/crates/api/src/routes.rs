@@ -30,6 +30,9 @@ use tower_http::cors::CorsLayer;
 use tracing::{error, info, instrument, warn};
 use ulid::Ulid;
 
+pub mod tokens;
+pub mod campaigns;
+
 #[derive(Clone)]
 pub struct AppState {
     pub cfg: AppConfig,
@@ -70,6 +73,201 @@ impl AppState {
     }
 }
 
+// Auth verification request/response
+#[derive(Deserialize)]
+pub struct AuthVerifyRequest {
+    pub token: String,
+}
+
+#[derive(Serialize)]
+pub struct AuthVerifyResponse {
+    pub user_id: String,
+    pub wallet_address: Option<String>,
+    pub email: Option<String>,
+}
+
+// NFT minting request/response
+#[derive(Deserialize)]
+pub struct MintNftRequest {
+    pub moment_id: String,
+}
+
+#[derive(Serialize)]
+pub struct MintNftResponse {
+    pub job_id: String,
+    pub status: String,
+    pub message: String,
+}
+
+/// POST /auth/verify - Verify Dynamic.xyz JWT token
+#[instrument(skip(state))]
+pub async fn auth_verify(
+    State(state): State<AppState>,
+    Json(payload): Json<AuthVerifyRequest>,
+) -> ApiResult<Json<AuthVerifyResponse>> {
+    // Use the shared auth module to verify the token
+    let claims = shared::auth::verify_dynamic_jwt(
+        &payload.token,
+        &state.cfg.dynamic_jwks_url,
+        &state.cfg.dynamic_environment_id,
+    ).await.map_err(|_| ApiError::Unauthorized)?;
+
+    Ok(Json(AuthVerifyResponse {
+        user_id: claims.sub,
+        wallet_address: claims.wallet_public_key,
+        email: claims.email,
+    }))
+}
+
+/// POST /v1/moments/:id/mint - Mint an NFT for a moment
+#[instrument(skip(state, user))]
+pub async fn mint_moment_nft(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(moment_id): Path<String>,
+    Json(_payload): Json<MintNftRequest>,
+) -> ApiResult<Json<MintNftResponse>> {
+    // Verify the moment exists and belongs to the user
+    let moment_exists: bool = sqlx::query_scalar!(
+        "SELECT EXISTS(SELECT 1 FROM oof_moments WHERE id = $1 AND wallet = $2)",
+        moment_id,
+        user.wallet_address.as_ref().unwrap_or(&"".to_string())
+    )
+    .fetch_one(&state.pg.0)
+    .await
+    .map_err(|_| ApiError::InternalServerError)?
+    .unwrap_or(false);
+
+    if !moment_exists {
+        return Err(ApiError::NotFound("Moment not found or not owned by user".to_string()));
+    }
+
+    // Create a job to mint the NFT
+    let job_id = new_id();
+    let payload = serde_json::json!({
+        "moment_id": moment_id,
+        "owner_wallet": user.wallet_address
+    });
+
+    sqlx::query!(
+        "INSERT INTO job_queue (id, kind, payload_json, max_attempts, run_after, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
+        job_id,
+        "mint_nft",
+        payload,
+        3,
+        OffsetDateTime::now_utc(),
+        OffsetDateTime::now_utc()
+    )
+    .execute(&state.pg.0)
+    .await
+    .map_err(|_| ApiError::InternalServerError)?;
+
+    Ok(Json(MintNftResponse {
+        job_id,
+        status: "queued".to_string(),
+        message: "NFT minting job queued successfully".to_string(),
+    }))
+}
+
+/// GET /v1/moments/:id/nft - Get NFT details for a moment
+#[instrument(skip(state))]
+pub async fn get_moment_nft(
+    State(state): State<AppState>,
+    Path(moment_id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let row = sqlx::query!(
+        "SELECT id, moment_id, nft_mint_address, metadata_uri, owner_wallet, created_at FROM minted_cards WHERE moment_id = $1",
+        moment_id
+    )
+    .fetch_optional(&state.pg.0)
+    .await
+    .map_err(|_| ApiError::InternalServerError)?;
+
+    match row {
+        Some(record) => {
+            let nft_details = serde_json::json!({
+                "id": record.id,
+                "moment_id": record.moment_id,
+                "nft_mint_address": record.nft_mint_address,
+                "metadata_uri": record.metadata_uri,
+                "owner_wallet": record.owner_wallet,
+                "created_at": record.created_at
+            });
+            Ok(Json(nft_details))
+        }
+        None => Err(ApiError::NotFound("NFT not found for this moment".to_string())),
+    }
+}
+
+fn compute_display_meta(kind: &str, severity_dec: Option<&str>) -> DisplayMeta {
+    let sev = severity_dec.and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+    let rarity = if sev > 0.8 {
+        "legendary"
+    } else if sev > 0.4 {
+        "epic"
+    } else {
+        "rare"
+    };
+
+    let (emoji, from, to) = match kind {
+        k if k.contains("sold") || k.contains("s2e") => ("💎", "from-green-600/40", "to-emerald-700/40"),
+        k if k.contains("bag") || k.contains("bhd") => ("📄", "from-rose-600/40", "to-orange-600/40"),
+        _ => ("🧹", "from-slate-600/40", "to-gray-700/40"),
+    };
+
+    DisplayMeta {
+        emoji: emoji.to_string(),
+        gradient_from: from.to_string(),
+        gradient_to: to.to_string(),
+        rarity: rarity.to_string(),
+    }
+}
+
+/// GET /v1/openapi.json - Serve static OpenAPI spec for v1
+pub async fn openapi_spec() -> Response {
+    let body = include_str!("../../../schemas/http/openapi.v1.json");
+    (
+        axum::http::StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
+}
+
+/// GET /ready - Readiness probe: verify core dependencies
+#[instrument(skip(state))]
+pub async fn ready(State(state): State<AppState>) -> Response {
+    // Check DB
+    let db_ok = sqlx::query_scalar::<_, i32>("SELECT 1")
+        .fetch_one(&state.pg.0)
+        .await
+        .map(|v| v == 1)
+        .unwrap_or(false);
+
+    // Optionally check Redis
+    let redis_ok = match &state.redis.0 {
+        Some(client) => client.exists("oof:ready:probe").await.unwrap_or(false) || true,
+        None => true, // optional dep
+    };
+
+    // Optionally attempt a light object-store write (best-effort)
+    let store_ok = match state
+        .store
+        .put("health/ready.txt", b"ok")
+        .await
+    {
+        Ok(_) => true,
+        Err(_) => state.cfg.environment != "production", // allow fail in non-prod
+    };
+
+    let ok = db_ok && redis_ok && store_ok;
+    if ok {
+        (axum::http::StatusCode::OK, "ready").into_response()
+    } else {
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, "not ready").into_response()
+    }
+}
+
 // Request/Response DTOs
 #[derive(Deserialize)]
 pub struct AnalyzeRequest {
@@ -99,6 +297,16 @@ pub struct MomentsQuery {
 }
 
 #[derive(Serialize)]
+pub struct DisplayMeta {
+    pub emoji: String,
+    #[serde(rename = "gradientFrom")]
+    pub gradient_from: String,
+    #[serde(rename = "gradientTo")]
+    pub gradient_to: String,
+    pub rarity: String,
+}
+
+#[derive(Serialize)]
 pub struct MomentDto {
     pub id: String,
     pub wallet: String,
@@ -123,6 +331,12 @@ pub struct MomentDto {
     pub preview_png_url: Option<String>,
     #[serde(rename = "cardUrl")]
     pub card_url: String,
+    #[serde(rename = "display", skip_serializing_if = "Option::is_none")]
+    pub display: Option<DisplayMeta>,
+    #[serde(rename = "tokenSymbol", skip_serializing_if = "Option::is_none")]
+    pub token_symbol: Option<String>,
+    #[serde(rename = "tokenLogoUrl", skip_serializing_if = "Option::is_none")]
+    pub token_logo_url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -475,11 +689,13 @@ pub async fn moments_list(
     };
 
     let sql = format!(
-        "SELECT id, wallet, mint, kind, t_event, pct_dec, missed_usd_dec,
-               severity_dec, sig_ref, slot_ref, version, explain_json, preview_png_url
-         FROM oof_moments
+        "SELECT m.id, m.wallet, m.mint, m.kind, m.t_event, m.pct_dec, m.missed_usd_dec,
+               m.severity_dec, m.sig_ref, m.slot_ref, m.version, m.explain_json, m.preview_png_url,
+               tf.symbol as token_symbol, tf.logo_url as token_logo_url
+         FROM oof_moments m
+         LEFT JOIN token_facts tf ON tf.mint = m.mint
          {}
-         ORDER BY t_event DESC, id DESC
+         ORDER BY m.t_event DESC, m.id DESC
          LIMIT {}",
         where_clause,
         limit + 1 // +1 to check if there are more results
@@ -503,11 +719,20 @@ pub async fn moments_list(
             let id: String = row.get("id");
             let t_event: OffsetDateTime = row.get("t_event");
 
-            MomentDto {
+            {
+                let kind: String = row.get("kind");
+                let severity_str = row
+                    .try_get::<Option<Decimal>, _>("severity_dec")
+                    .ok()
+                    .flatten()
+                    .map(|d| d.to_string());
+                let display = compute_display_meta(&kind, severity_str.as_deref());
+
+                MomentDto {
                 id: id.clone(),
                 wallet: row.get("wallet"),
                 mint: row.try_get("mint").ok(),
-                kind: row.get("kind"),
+                kind,
                 t_event: t_event
                     .format(&time::format_description::well_known::Rfc3339)
                     .unwrap_or_default(),
@@ -538,6 +763,9 @@ pub async fn moments_list(
                     state.cfg.cdn_base.trim_end_matches('/'),
                     id
                 ),
+                display: Some(display),
+                token_symbol: row.try_get("token_symbol").ok(),
+                token_logo_url: row.try_get("token_logo_url").ok(),
             }
         })
         .collect();
@@ -577,44 +805,66 @@ pub async fn moment_detail(
         return Err(ApiError::BadRequest("Invalid moment ID format".to_string()));
     }
 
-    let row = sqlx::query!(
-        "SELECT id, wallet, mint, kind, t_event, pct_dec, missed_usd_dec,
-               severity_dec, sig_ref, slot_ref, version, explain_json, preview_png_url
-         FROM oof_moments WHERE id = $1",
-        id
+    let row = sqlx::query(
+        "SELECT m.id, m.wallet, m.mint, m.kind, m.t_event, m.pct_dec, m.missed_usd_dec,
+                m.severity_dec, m.sig_ref, m.slot_ref, m.version, m.explain_json, m.preview_png_url,
+                tf.symbol as token_symbol, tf.logo_url as token_logo_url
+         FROM oof_moments m
+         LEFT JOIN token_facts tf ON tf.mint = m.mint
+         WHERE m.id = $1"
     )
+    .bind(&id)
     .fetch_optional(&state.pg.0)
     .await?;
 
     match row {
         Some(row) => {
+            let kind: String = row.get("kind");
+            let severity_str: Option<String> = row
+                .try_get::<Option<Decimal>, _>("severity_dec")
+                .ok()
+                .flatten()
+                .map(|d| d.to_string());
+            let display = compute_display_meta(&kind, severity_str.as_deref());
+
+            let t_event: OffsetDateTime = row.get("t_event");
             let moment_dto = MomentDto {
-                id: row.id,
-                wallet: row.wallet,
-                mint: row.mint,
-                kind: row.kind,
-                t_event: row
-                    .t_event
+                id: row.get("id"),
+                wallet: row.get("wallet"),
+                mint: row.try_get("mint").ok(),
+                kind,
+                t_event: t_event
                     .format(&time::format_description::well_known::Rfc3339)
                     .unwrap_or_default(),
-                pct_dec: row.pct_dec.map(|d| d.to_string()),
-                missed_usd_dec: row.missed_usd_dec.map(|d| d.to_string()),
-                severity_dec: row.severity_dec.map(|d| d.to_string()),
-                sig_ref: row.sig_ref,
-                slot_ref: row.slot_ref,
-                version: row.version,
-                explain_json: row.explain_json.unwrap_or(serde_json::json!({})),
-                preview_png_url: row.preview_png_url,
+                pct_dec: row
+                    .try_get::<Option<Decimal>, _>("pct_dec")
+                    .ok()
+                    .flatten()
+                    .map(|d| d.to_string()),
+                missed_usd_dec: row
+                    .try_get::<Option<Decimal>, _>("missed_usd_dec")
+                    .ok()
+                    .flatten()
+                    .map(|d| d.to_string()),
+                severity_dec: severity_str,
+                sig_ref: row.try_get("sig_ref").ok(),
+                slot_ref: row.try_get("slot_ref").ok(),
+                version: row.try_get("version").ok(),
+                explain_json: row
+                    .try_get::<serde_json::Value, _>("explain_json")
+                    .unwrap_or(serde_json::json!({})),
+                preview_png_url: row.try_get("preview_png_url").ok(),
                 card_url: format!(
                     "{}/v1/cards/moment/{}.png",
                     state.cfg.cdn_base.trim_end_matches('/'),
                     id
                 ),
+                display: Some(display),
+                token_symbol: row.try_get("token_symbol").ok(),
+                token_logo_url: row.try_get("token_logo_url").ok(),
             };
 
-            state
-                .metrics
-                .increment_counter("moment_detail_requests_total");
+            state.metrics.increment_counter("moment_detail_requests_total");
             Ok(Json(moment_dto))
         }
         None => Err(ApiError::NotFound("Moment not found".to_string())),

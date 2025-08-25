@@ -20,3 +20,10 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 anyhow = "1.0"
 zstd = "0.13"
 futures = "0.3"
+
+# Solana and Metaplex dependencies for NFT minting
+solana-program = "1.16"
+solana-client = "1.16"
+solana-sdk = "1.16"
+mpl-token-metadata = "4.1"
+mpl-candy-guard = "3.1"

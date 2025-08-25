@@ -18,6 +18,17 @@ use tokio::time::{interval, Duration as TokioDuration};
 use tracing::{debug, error, info, instrument, warn, Instrument};
 use ulid::Ulid;
 
+// Import the new mint_nft worker
+mod jobs {
+    pub mod alerts_dispatch;
+    pub mod backfill_wallet;
+    pub mod campaign_publish_root;
+    pub mod nightly_compact;
+    pub mod price_snapshots;
+    pub mod top_mints_refresh;
+    pub mod mint_nft; // Add the new mint_nft module
+}
+
 /// Job structure from database
 #[derive(Debug, Deserialize)]
 struct Job {
@@ -223,6 +234,7 @@ async fn process_next_job(state: &WorkerState) -> Result<bool> {
         "calculate_extremes" => job_calculate_extremes(state, &job).await,
         "cleanup_old_data" => job_cleanup_old_data(state, &job).await,
         "generate_leaderboard" => job_generate_leaderboard(state, &job).await,
+        "mint_nft" => job_mint_nft(state, &job).await, // Add the new mint_nft job type
         _ => {
             warn!(job_kind = %job.kind, "Unknown job type");
             Err(anyhow!("Unknown job type: {}", job.kind))
@@ -300,6 +312,17 @@ async fn process_next_job(state: &WorkerState) -> Result<bool> {
     }
 
     Ok(true)
+}
+
+/// Mint NFT job handler
+#[instrument(skip(state, job))]
+async fn job_mint_nft(state: &WorkerState, job: &Job) -> Result<()> {
+    let payload: jobs::mint_nft::MintNftJob = serde_json::from_value(job.payload_json.clone())?;
+    
+    info!(moment_id = %payload.moment_id, owner_wallet = %payload.owner_wallet, "Starting NFT minting job");
+    
+    let worker = jobs::mint_nft::MintNftWorker::new(state.pool.clone());
+    worker.process(payload).await
 }
 
 /// Backfill wallet transaction history
@@ -1307,7 +1330,7 @@ async fn compute_wallet_mint(
                                         .bind(Some(m.to_string()))
                                         .bind("S2E")
                                         .bind(ts)
-                                        .bind(None::<time::Duration>)
+                                        .bind(None::<Duration>)
                                         .bind(Some(missed_pct))
                                         .bind(Some(missed_usd))
                                         .bind(Some((missed_pct / Decimal::from_str_exact("0.75").unwrap()).min(Decimal::ONE)))
@@ -1316,7 +1339,8 @@ async fn compute_wallet_mint(
                                         .bind(Some("1".to_string()))
                                         .bind(serde_json::json!({"price_source":"db","confidence":"observed+external"}))
                                         .bind(None::<String>)
-                                        .execute(&pg.0).await;
+                                        .execute(&pg.0)
+                                        .await;
                                     let _ = sqlx::query("NOTIFY new_oof_moment, $1")
                                         .bind(&id)
                                         .execute(&pg.0)

@@ -142,6 +142,14 @@ impl AppConfig {
             // Additional security
             app_secret: Self::get_required_var("APP_SECRET")?,
             environment: env::var("ENVIRONMENT").unwrap_or_else(|_| "development".into()),
+            admin_user_ids: env::var("ADMIN_USER_IDS")
+                .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
+                .unwrap_or_default(),
+
+            // Social API keys
+            twitter_api_key: Self::get_required_var("TWITTER_API_KEY")?,
+            twitter_api_secret_key: Self::get_required_var("TWITTER_API_SECRET_KEY")?,
+            farcaster_api_key: Self::get_required_var("FARCASTER_API_KEY")?,
         })
     }
 

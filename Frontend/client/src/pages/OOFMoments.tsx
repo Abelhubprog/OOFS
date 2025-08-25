@@ -4,6 +4,7 @@ import { useOOFAuth } from '@/providers/AuthProvider';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiRequest } from '@/lib/queryClient';
 import { useToast } from '@/hooks/use-toast';
+import { useMomentsStream } from '@/hooks/useMomentsStream';
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -13,7 +14,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { Textarea } from '@/components/ui/textarea';
 import { Progress } from '@/components/ui/progress';
-import { ZoraOneClickMinter } from '@/components/ZoraOneClickMinter';
 import {
   Sparkles,
   Brain,
@@ -50,7 +50,7 @@ import {
 
 // Types for the OOF Moments system
 interface OOFMoment {
-  id: number;
+  id: string | number;
   title: string;
   description: string;
   quote: string;
@@ -325,30 +325,8 @@ const OOFCard: React.FC<{
     onInteraction(voteType === 'up' ? 'upvote' : 'downvote', moment.id);
   };
 
-  const handleZoraPost = async (purchaseTokens: boolean = false) => {
-    setIsPosting(true);
-    try {
-      const response = await fetch('/api/oof-tokens/zora-purchase', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          momentId: moment.id,
-          userWalletAddress: primaryWallet?.address || user?.walletAddress,
-          oofAmount: purchaseTokens ? oofAmount : 0,
-          purchaseTokens
-        })
-      });
-
-      const result = await response.json();
-      if (result.success) {
-        onInteraction('zora_posted', moment.id);
-        setShowZoraOptions(false);
-      }
-    } catch (error) {
-      console.error('Zora posting failed:', error);
-    } finally {
-      setIsPosting(false);
-    }
+  const handleZoraPost = async (_purchaseTokens: boolean = false) => {
+    console.warn('Zora posting is disabled until real on-chain flow is implemented.');
   };
 
   const getCardTypeInfo = (type: string) => {
@@ -383,6 +361,17 @@ const OOFCard: React.FC<{
       animate={{ opacity: 1, y: 0 }}
       className={`bg-gradient-to-br ${moment.cardMetadata.gradientFrom} ${moment.cardMetadata.gradientTo} rounded-xl p-6 text-white ${getRarityGlow(moment.rarity)} border border-white/20`}
     >
+      {/* Prefer server-rendered card image when available */}
+      {moment.imageUrl ? (
+        <div className="mb-4 overflow-hidden rounded-xl border border-white/10 bg-black/20">
+          <img
+            src={moment.imageUrl}
+            alt={moment.title}
+            className="w-full h-auto object-cover"
+            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+          />
+        </div>
+      ) : null}
       {/* Enhanced Card Header */}
       <div className="flex items-start justify-between mb-4">
         <div className="flex items-center space-x-3">
@@ -648,20 +637,83 @@ const OOFCard: React.FC<{
 
 // Real-time Community Feed Component
 const CommunityFeed: React.FC = () => {
+  // Map backend MomentDto to UI OOFMoment
+  const mapMoment = (m: any): OOFMoment => {
+    const kind = String(m.kind || '').toLowerCase();
+    const t = kind.includes('s2e') ? 'gains_master' : kind.includes('bhd') ? 'paper_hands' : 'dust_collector';
+    const sev = parseFloat(m.severity_dec || '0');
+    const rarityComputed: OOFMoment['rarity'] = sev > 0.8 ? 'legendary' : sev > 0.4 ? 'epic' : 'rare';
+    const emoji = m.display?.emoji || (t === 'gains_master' ? '💎' : t === 'paper_hands' ? '📄' : '🧹');
+    const grad = m.display?.gradientFrom && m.display?.gradientTo
+      ? { from: m.display.gradientFrom, to: m.display.gradientTo }
+      : t === 'gains_master'
+        ? { from: 'from-green-600/40', to: 'to-emerald-700/40' }
+        : t === 'paper_hands'
+          ? { from: 'from-rose-600/40', to: 'to-orange-600/40' }
+          : { from: 'from-slate-600/40', to: 'to-gray-700/40' };
+    const rarity: OOFMoment['rarity'] = (m.display?.rarity as any) || rarityComputed;
+    return {
+      id: m.id,
+      title: `${kind.toUpperCase()} ${m.tokenSymbol ? `• ${m.tokenSymbol}` : m.mint ? `• ${m.mint.slice(0,6)}` : ''}`.trim(),
+      description: m.explain_json?.summary || 'OOF Moment',
+      quote: '',
+      rarity,
+      momentType: t,
+      tokenSymbol: m.explain_json?.tokenSymbol || '',
+      tokenAddress: m.mint || '',
+      walletAddress: m.wallet || '',
+      userId: undefined,
+      cardMetadata: {
+        background: '',
+        emoji,
+        textColor: '#ffffff',
+        accentColor: '#ffffff',
+        gradientFrom: grad.from,
+        gradientTo: grad.to,
+      },
+      socialStats: { upvotes: 0, downvotes: 0, likes: 0, comments: 0, shares: 0, views: 0 },
+      hashtags: [],
+      isPublic: true,
+      createdAt: new Date(m.t_event || Date.now()),
+      zoraAddress: undefined,
+      // Hint for OOFCard to render server-generated image first
+      imageUrl: `/api/cards/moment/${encodeURIComponent(m.id)}.png`,
+    };
+  };
+
   const { data: publicMoments = [], isLoading } = useQuery({
-    queryKey: ['/api/oof-moments/public'],
+    queryKey: ['/api/moments', { limit: 30 }],
     queryFn: async () => {
-      const response = await fetch('/api/oof-moments/public');
-      if (!response.ok) throw new Error('Failed to fetch public moments');
-      return response.json();
+      const response = await fetch('/api/moments?limit=30');
+      if (!response.ok) throw new Error('Failed to fetch moments');
+      const json = await response.json();
+      const list = Array.isArray(json?.data) ? json.data : [];
+      return list.map(mapMoment);
     },
-    refetchInterval: 5000 // Refresh every 5 seconds for real-time updates
+    refetchInterval: 10000
   });
 
-  const handleInteraction = (type: string, momentId: number) => {
+  const handleInteraction = (type: string, momentId: number | string) => {
     console.log(`${type} interaction on moment ${momentId}`);
     // Handle social interactions
   };
+
+  // Live SSE stream: merge newest moments into feed
+  const { events } = useMomentsStream();
+  const streamed = React.useMemo(() => {
+    const set = new Map<string | number, any>();
+    const incoming: any[] = [];
+    for (const ev of events) {
+      if (ev.event === 'message' && ev.data && ev.data.id) {
+        const mapped = mapMoment(ev.data);
+        if (!set.has(mapped.id)) {
+          set.set(mapped.id, true);
+          incoming.push(mapped);
+        }
+      }
+    }
+    return incoming;
+  }, [events]);
 
   if (isLoading) {
     return (
@@ -684,7 +736,10 @@ const CommunityFeed: React.FC = () => {
 
       {publicMoments.length > 0 ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {publicMoments.map((moment: OOFMoment) => (
+          {[...streamed, ...publicMoments].reduce((acc: OOFMoment[], m: OOFMoment) => {
+            if (!acc.find((x) => x.id === m.id)) acc.push(m);
+            return acc;
+          }, []).slice(0, 60).map((moment: OOFMoment) => (
             <OOFCard
               key={moment.id}
               moment={moment}
@@ -721,82 +776,65 @@ export default function OOFMomentsPage() {
   });
   const [generatedMoments, setGeneratedMoments] = useState<OOFMoment[]>([]);
   const [analysisStatus, setAnalysisStatus] = useState<any>(null);
-  const [oofTokenInfo, setOofTokenInfo] = useState<any>(null);
   const [isLoadingStatus, setIsLoadingStatus] = useState<boolean>(false);
   const [selectedChain, setSelectedChain] = useState<string>('solana');
 
-  // Fetch user's OOF Moments
-  const { data: userMoments = [], isLoading: loadingUser } = useQuery({
-    queryKey: ['/api/oof-moments/user', user?.userId],
+  // Fetch wallet-specific moments from backend
+  const { data: walletMoments = [], isLoading: loadingWalletMoments, refetch: refetchWalletMoments } = useQuery({
+    queryKey: ['/api/moments', { wallet: walletAddress }],
     queryFn: async () => {
-      const response = await fetch(`/api/oof-moments/user/${user?.userId}`);
-      if (!response.ok) throw new Error('Failed to fetch user moments');
-      return response.json();
+      if (!walletAddress) return [] as OOFMoment[];
+      const response = await fetch(`/api/moments?wallet=${encodeURIComponent(walletAddress)}&limit=50`);
+      if (!response.ok) throw new Error('Failed to fetch wallet moments');
+      const json = await response.json();
+      const list = Array.isArray(json?.data) ? json.data : [];
+      return list.map((m: any) => (mapMoment as any)(m));
     },
-    enabled: !!user?.userId
+    enabled: !!walletAddress
   });
 
-  // Fetch analysis rate limit status
-  const { data: rateLimitStatus } = useQuery({
-    queryKey: ['/api/oof-moments/analysis-status', walletAddress],
-    queryFn: async () => {
-      if (!walletAddress) return null;
-      const response = await fetch(`/api/oof-moments/analysis-status/${walletAddress}`);
-      if (!response.ok) throw new Error('Failed to check analysis status');
-      return response.json();
-    },
-    enabled: !!walletAddress,
-    refetchInterval: 60000 // Check every minute
-  });
+  // No local rate-limit status endpoint; backend applies quotas/rate limits
 
-  // Fetch $OOF token information
-  const { data: tokenInfo } = useQuery({
-    queryKey: ['/api/oof-tokens/info'],
-    queryFn: async () => {
-      const response = await fetch('/api/oof-tokens/info');
-      if (!response.ok) throw new Error('Failed to fetch token info');
-      return response.json();
-    },
-    staleTime: 5 * 60 * 1000 // Cache for 5 minutes
-  });
+  // Removed OOF token info (no token features active)
 
-  // AI Analysis Mutation
+  // Analyze via backend + SSE progress
   const analyzeWalletMutation = useMutation({
     mutationFn: async (address: string) => {
-      const response = await fetch('/api/ai/analyze-wallet', {
+      const res = await fetch('/api/analyze', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ walletAddress: address }),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ wallets: [address] })
       });
-
-      if (!response.ok) {
-        throw new Error('Failed to analyze wallet');
-      }
-
-      const data = await response.json();
-      return data;
+      if (!res.ok) throw new Error('Failed to enqueue analysis');
+      return res.json();
     },
     onSuccess: (data) => {
-      if (data.success && data.moments) {
-        setGeneratedMoments(data.moments);
-        setActiveTab('my_moments');
-        toast({
-          title: 'Analysis Complete!',
-          description: `Generated ${data.moments.length} legendary OOF Moments`,
+      const jobId = data?.jobId;
+      if (!jobId) return;
+      try {
+        const es = new EventSource(`/api/analyze/${jobId}/stream`);
+        es.addEventListener('progress', (e: MessageEvent) => {
+          setGenerationProgress({
+            stage: 'analyzing',
+            progress: Math.min(95, generationProgress.progress + 5),
+            message: (e.data as string) || 'Processing...',
+            agentActive: 'scout'
+          });
         });
-      } else {
-        throw new Error(data.message || 'Analysis failed');
+        es.addEventListener('done', () => {
+          setGenerationProgress({ stage: 'complete', progress: 100, message: 'Analysis complete', agentActive: 'publisher' });
+          refetchWalletMoments();
+          es.close();
+        });
+        es.addEventListener('error', () => {
+          es.close();
+        });
+      } catch (err) {
+        console.error('SSE init failed', err);
       }
     },
     onError: (error) => {
-      console.error('Wallet analysis error:', error);
-      toast({
-        title: 'Analysis Failed',
-        description: error instanceof Error ? error.message : 'Unable to analyze wallet. Please try again.',
-        variant: 'destructive'
-      });
+      toast({ title: 'Analysis Failed', description: error instanceof Error ? error.message : 'Unable to analyze wallet.', variant: 'destructive' });
     }
   });
 
@@ -810,42 +848,7 @@ export default function OOFMomentsPage() {
       return;
     }
 
-    // Check rate limiting
-    if (rateLimitStatus && !rateLimitStatus.allowed) {
-      const nextTime = new Date(rateLimitStatus.nextAllowedTime).toLocaleString();
-      toast({
-        title: 'Analysis Limit Reached',
-        description: `Next analysis available at ${nextTime}`,
-        variant: 'destructive'
-      });
-      return;
-    }
-
-    setIsGenerating(true);
-    setGenerationProgress({
-      stage: 'analyzing',
-      progress: 10,
-      message: `Multi-chain scout scanning ${selectedChain.toUpperCase()} wallet...`,
-      agentActive: 'scout'
-    });
-
-    // Enhanced multi-agent workflow
-    const progressSteps = [
-      { stage: 'analyzing', progress: 25, message: `Analyzing ${selectedChain} memecoins transactions...`, agentActive: 'scout' },
-      { stage: 'detecting', progress: 50, message: 'AI Director crafting emotional narratives...', agentActive: 'director' },
-      { stage: 'designing', progress: 75, message: 'Art Agent designing 3 unique card types...', agentActive: 'artist' },
-      { stage: 'posting', progress: 90, message: 'Zora Agent preparing Base network launch...', agentActive: 'publisher' },
-      { stage: 'complete', progress: 100, message: 'Multi-chain OOF Moments ready!', agentActive: 'publisher' }
-    ] as const;
-
-    for (let i = 0; i < progressSteps.length; i++) {
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      setGenerationProgress(progressSteps[i]);
-    }
-
-    // Execute the enhanced analysis
     analyzeWalletMutation.mutate(walletAddress);
-    setIsGenerating(false);
   };
 
   const handleInteraction = (type: string, momentId: number) => {
@@ -890,8 +893,6 @@ export default function OOFMomentsPage() {
             transition={{ delay: 0.3 }}
           >
             Transform your crypto trading stories into shareable social media moments
-            <br />
-            <span className="text-yellow-300 font-bold">and launch them as tokens on Zora</span>
           </motion.p>
 
           <motion.div
@@ -1044,28 +1045,7 @@ export default function OOFMomentsPage() {
                 </div>
               </div>
 
-              {/* $OOF Token Utility */}
-              {tokenInfo && (
-                <div className="text-center p-4 bg-gradient-to-r from-green-900/30 to-emerald-900/30 rounded-lg border border-green-700/50 mb-4">
-                  <div className="flex items-center justify-center mb-2">
-                    <Coins className="w-5 h-5 mr-2 text-green-400" />
-                    <span className="text-lg font-bold text-green-300">$OOF Token Utility</span>
-                  </div>
-                  <div className="grid grid-cols-2 gap-4 text-sm">
-                    <div>
-                      <span className="text-green-200">Exchange Rate:</span>
-                      <span className="text-white font-semibold ml-2">${tokenInfo.exchangeRates?.oofToUsd || 0.025}</span>
-                    </div>
-                    <div>
-                      <span className="text-green-200">Bridge Fee:</span>
-                      <span className="text-white font-semibold ml-2">{((tokenInfo.exchangeRates?.bridgeFee || 0.03) * 100).toFixed(1)}%</span>
-                    </div>
-                  </div>
-                  <div className="text-xs text-green-400 mt-2">
-                    Use $OOF tokens to purchase first token supply when posting to Zora
-                  </div>
-                </div>
-              )}
+              {/* Token utility section removed until on-chain implementation is live */}
 
               <div className="text-center text-sm text-purple-400">
                 AI agents analyze {selectedChain.toUpperCase()} memecoins across Max Gains, Dusts & Lost Opportunities
@@ -1113,27 +1093,17 @@ export default function OOFMomentsPage() {
             </TabsList>
 
             <TabsContent value="discover" className="space-y-6">
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="text-center py-16"
-              >
-                <div className="text-6xl mb-6">🔍</div>
-                <h3 className="text-3xl font-bold text-white mb-4">Loading community moments...</h3>
-                <p className="text-purple-300 text-lg">
-                  Discover epic OOF Moments from the community
-                </p>
-              </motion.div>
+              <CommunityFeed />
             </TabsContent>
 
             <TabsContent value="my_moments" className="space-y-6">
-              {userMoments.length > 0 || generatedMoments.length > 0 ? (
+              {walletMoments.length > 0 || generatedMoments.length > 0 ? (
                 <motion.div
                   className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8"
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                 >
-                  {[...userMoments, ...generatedMoments].map((moment, index) => (
+                  {[...walletMoments, ...generatedMoments].map((moment, index) => (
                     <motion.div
                       key={moment.id}
                       initial={{ opacity: 0, y: 50 }}
@@ -1143,7 +1113,7 @@ export default function OOFMomentsPage() {
                       <OOFCard
                         moment={moment}
                         onInteraction={handleInteraction}
-                        isOwner={moment.userId === user?.userId}
+                        isOwner={true}
                       />
                     </motion.div>
                   ))}

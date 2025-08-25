@@ -2,7 +2,20 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ArrowUp, ArrowDown, TrendingUp } from "lucide-react";
-import type { Token } from "@shared/schema";
+// Minimal token type for UI only
+type Token = {
+  id?: number;
+  address?: string;
+  name: string;
+  symbol: string;
+  icon?: string | null;
+  price: string | null;
+  marketCap?: string | null;
+  volume24h?: string | null;
+  change24h?: string | null;
+  riskScore?: number | null;
+  launchDate?: string | null;
+};
 
 interface TokenCardProps {
   token: Token;

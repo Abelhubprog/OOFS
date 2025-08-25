@@ -29,16 +29,13 @@ export default function WalletAnalyzer() {
 
   const analyzeWalletMutation = useMutation({
     mutationFn: async (address: string) => {
-      const response = await apiRequest("POST", "/api/analyze-wallet", {
-        walletAddress: address,
-      });
-      return await response.json();
+      const res = await apiRequest("POST", "/api/analyze", { wallets: [address] });
+      return await res.json();
     },
-    onSuccess: (data) => {
-      setOpportunities(data);
+    onSuccess: (_data) => {
       toast({
-        title: "Wallet Analyzed!",
-        description: `Found ${data.length} epic OOF moments in your wallet.`,
+        title: "Analysis started",
+        description: "We are processing your wallet. Check OOF Moments for results.",
       });
     },
     onError: (error) => {

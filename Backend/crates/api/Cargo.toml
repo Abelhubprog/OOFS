@@ -24,3 +24,5 @@ base64 = "0.22"
 async-stream = "0.3"
 regex = "1.10"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tweety_rs = "0.3"
+farcaster-rs = "0.1"

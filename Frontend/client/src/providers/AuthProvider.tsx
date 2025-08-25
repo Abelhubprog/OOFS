@@ -128,8 +128,8 @@ const DYNAMIC_SETTINGS = {
         console.log('✅ Wallet connected:', args.primaryWallet.address);
 
         try {
-          // Save user to OOF Platform backend
-          await fetch('/api/auth/connect-wallet', {
+          // Save user to OOF Platform backend using v1 API
+          await fetch('/v1/auth/connect-wallet', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -186,15 +186,15 @@ function AuthProviderInner({ children }: { children: ReactNode }) {
     const syncUser = async () => {
       if (user && primaryWallet) {
         try {
-          // Fetch user data from OOF Platform backend
-          const response = await fetch(`/api/users/${primaryWallet.address}`);
+          // Fetch user data from OOF Platform backend using v1 API
+          const response = await fetch(`/v1/users/${primaryWallet.address}`);
           let userData;
 
           if (response.ok) {
             userData = await response.json();
           } else {
-            // Create new user if doesn't exist
-            const createResponse = await fetch('/api/users', {
+            // Create new user if doesn't exist using v1 API
+            const createResponse = await fetch('/v1/users', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -318,7 +318,7 @@ function AuthProviderInner({ children }: { children: ReactNode }) {
     if (!authUser) return;
 
     try {
-      const response = await fetch(`/api/users/${authUser.id}`, {
+      const response = await fetch(`/v1/users/${authUser.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(stats)
@@ -338,7 +338,7 @@ function AuthProviderInner({ children }: { children: ReactNode }) {
     if (!authUser) return;
 
     try {
-      await fetch('/api/analytics/activity', {
+      await fetch('/v1/analytics/activity', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
